@@ -5,7 +5,7 @@ the validation contract the smoke tests assert against. They are the wire format
 between pipeline stages — every stage emits JSON shaped like one of these.
 
 Design choice: every leaf value is Optional (``| None = None``). This is an
-explicit anti-hallucination posture — the model is PRIVED with the option to
+explicit anti-hallucination posture — the model is PRIVILEGED with the option to
 return ``null`` for anything it cannot read, so the Instruction Contract's
 "never fabricate; missing -> null" rule is enforceable at the schema level, not
 just the prompt level.

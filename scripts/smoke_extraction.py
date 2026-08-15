@@ -199,12 +199,14 @@ async def _run() -> str:
     _assert_extraction("run-2", second)
 
     # Determinism at temp=0.0: identical structured JSON both runs.
-    first_inv = json.dumps(first.get("invoice"), sort_keys=True)
-    second_inv = json.dumps(second.get("invoice"), sort_keys=True)
-    if first_inv != second_inv:
+    # Compare the full ExtractionResult (invoice + confidence + missing_fields),
+    # not just the invoice, for a strictly stronger determinism proof.
+    first_full = json.dumps(first, sort_keys=True)
+    second_full = json.dumps(second, sort_keys=True)
+    if first_full != second_full:
         print(f"{FAIL}NON-DETERMINISTIC at temp=0.0:{RESET}", file=sys.stderr)
-        print(f"  run-1: {first_inv}", file=sys.stderr)
-        print(f"  run-2: {second_inv}", file=sys.stderr)
+        print(f"  run-1: {first_full}", file=sys.stderr)
+        print(f"  run-2: {second_full}", file=sys.stderr)
         raise SystemExit(1)
     print(f"{OK}determinism PASS: identical structured output across 2 runs{RESET}")
     print(f"{OK}smoke_extraction PASS{RESET}")
