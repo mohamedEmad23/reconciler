@@ -142,3 +142,59 @@ class VerificationResult(BaseModel):
         ..., ge=0.0, le=1.0, description="self-assessed verification confidence"
     )
     revised: bool = False  # True if the draft was revised based on verification
+
+
+# ---------------------------------------------------------------------------
+# Phase 6 — Reporting + Safety schemas
+# ---------------------------------------------------------------------------
+
+# Discrepancy type strings allowed in the digest (mirrors DISCREPANCY_TYPES but
+# represented as a Pydantic Literal for the reporting agent's output schema).
+ReportDiscrepancyType = Literal[
+    "amount_mismatch",
+    "vendor_mismatch",
+    "date_mismatch",
+    "invoice_number_mismatch",
+    "duplicate_payment",
+    "no_bank_match",
+    "extra_invoice_line",
+]
+
+
+class FlaggedItem(BaseModel):
+    """One item escalated in the weekly digest for human review.
+
+    A flag is set if: a discrepancy was found, verification confidence was below
+    the HITL Tier-1 threshold, or a HITL flag was annotated in session state by
+    the middleware's ``after_model_callback``.
+    """
+
+    invoice_number: str | None = None
+    vendor: str | None = None
+    discrepancy_type: ReportDiscrepancyType | None = None
+    description: str | None = None
+    invoice_value: str | None = None
+    bank_value: str | None = None
+    confidence: float | None = None
+
+
+class ReportingResult(BaseModel):
+    """Envelope the Reporting agent returns — the weekly digest composition +
+    send status.
+
+    ``email_sent`` is True only if the ``send_digest_email`` tool was called
+    AND the human approved via HITL Tier-2. ``email_blocked_by_hitl`` is True
+    if the human rejected the send (or the run ended without approval).
+    """
+
+    digest_composed: bool = False
+    flagged_items: list[FlaggedItem] = Field(default_factory=list)
+    total_invoices: int = 0
+    flagged_count: int = 0
+    email_sent: bool = False
+    email_blocked_by_hitl: bool = False
+    recipient: str | None = None
+    subject: str | None = None
+    confidence: float = Field(
+        ..., ge=0.0, le=1.0, description="self-assessed reporting confidence"
+    )
