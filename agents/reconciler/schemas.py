@@ -60,6 +60,66 @@ class ExtractionResult(BaseModel):
         ..., ge=0.0, le=1.0, description="self-assessed extraction confidence"
     )
     missing_fields: list[str] = Field(default_factory=list)
-    # SHAKE-free content hash of the source PDF, used for idempotency (Phase 4)
-    # and dedupe. Computed by the Intake stage, echoed through here.
+    # Content hash of the source PDF, used for idempotency (Phase 4) and dedupe.
+    # Computed by the Intake stage, echoed through here.
     source_hash: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 — Verification (CoVe) schemas
+# ---------------------------------------------------------------------------
+
+# Closed set of discrepancy types. Keeping it a string (not an Enum) so the
+# model can emit any of these literally in JSON without enum-coercion surprises;
+# the smoke asserts the types it sees are inside this set.
+DISCREPANCY_TYPES = frozenset(
+    {
+        "amount_mismatch",
+        "vendor_mismatch",
+        "date_mismatch",
+        "invoice_number_mismatch",
+        "duplicate_payment",
+        "no_bank_match",
+        "extra_invoice_line",
+    }
+)
+
+
+class Discrepancy(BaseModel):
+    """A single discrepancy the Verification agent flags.
+
+    Anti-hallucination posture: every field is Optional so a flag can say "we
+    saw a mismatch" without inventing values the agent could not source. The
+    ``type`` should be one of DISCREPANCY_TYPES; ``invoice_value`` / ``bank_value``
+    echo exactly what each side said (as strings to avoid float-repr drift).
+    """
+
+    type: str | None = None
+    description: str | None = None
+    invoice_value: str | None = None
+    bank_value: str | None = None
+
+
+class VerificationResult(BaseModel):
+    """Envelope the Verification (CoVe) agent returns to the Supervisor.
+
+    Cross-checks an extracted ``Invoice`` against a bank-statement CSV using the
+    Chain-of-Verification pattern: draft a provisional match, plan verification
+    questions, answer each INDEPENDENTLY (not conditioned on the draft), then
+    revise. The ``verification_questions`` and ``verification_answers`` lists are
+    the auditable CoVe trace — they prove the agent did not just rubber-stamp
+    its own first draft.
+    """
+
+    matched: bool = False
+    matched_amount: float | None = None
+    matched_date: str | None = None  # ISO YYYY-MM-DD
+    discrepancies: list[Discrepancy] = Field(default_factory=list)
+    # CoVe trace — the planned questions and their independently-derived
+    # answers. Same length; zip() together in the audit.
+    verification_questions: list[str] = Field(default_factory=list)
+    verification_answers: list[str] = Field(default_factory=list)
+    confidence: float = Field(
+        ..., ge=0.0, le=1.0, description="self-assessed verification confidence"
+    )
+    revised: bool = False  # True if the draft was revised based on verification
