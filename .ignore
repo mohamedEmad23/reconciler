@@ -1,0 +1,3 @@
+# Allow OpenCode to read deepwork state even though it's git-ignored
+!.slim/deepwork/
+!.slim/deepwork/**

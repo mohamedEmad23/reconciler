@@ -1,0 +1,42 @@
+# Anything not needed to BUILD the Docker image is excluded from the upload
+# staging set by `gcloud run deploy --source .`. This keeps deploys fast and,
+# crucially, ensures NO credentials or local state leave this machine.
+
+# Virtual envs / build artifacts (huge; never needed in the image)
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+wheels/
+*.log
+
+# VCS + AI session/local state
+.git/
+.gitignore
+.slim/
+.ignore
+
+# Local-only docs/tests/scripts (kept in repo, not shipped to prod image)
+docs/
+tests/
+scripts/smoke.py
+findings.md
+
+# Editor / misc
+.DS_Store
+.idea/
+.vscode/
+
+# Credentials — MUST NEVER be uploaded. ~/keys is outside the repo, but a stray
+# copy is fatal, so exclude every JSON key/tokens file defensively.
+keys/
+*_secret*.json
+*reconciler-sa*.json
+*oauth_tokens*.json
+client_secret*.json
+
+# Python version pinning file (uv local concern)
+.python-version
+uv.lock

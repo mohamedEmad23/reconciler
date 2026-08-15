@@ -1,0 +1,18 @@
+[project]
+name = "reconciler"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "google-adk>=2.7.0",
+    "google-api-python-client>=2.198.0",
+    "google-auth-httplib2>=0.4.1",
+    "google-auth-oauthlib>=1.4.0",
+    "google-cloud-aiplatform>=1.164.0",
+    "google-cloud-firestore>=2.28.1",
+    "google-cloud-pubsub>=2.39.1",
+    "google-cloud-scheduler>=2.20.0",
+    "google-cloud-secret-manager>=2.30.0",
+    "google-genai>=2.18.1",
+]
