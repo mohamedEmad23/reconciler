@@ -232,7 +232,7 @@ def _validate_cove_trace(parsed: dict, scenario: str) -> None:
         ql = q.lower()
         # Forbidden self-referential phrasing — CoVe questions must be CHECKABLE
         # against inputs, not 'is my draft right?'.
-        forbidden = ("my draft", "is my answer", "my answer correct", "is my guess")
+        forbidden = ("my draft", "is my answer", "my answer correct", "is my guess", "my answer")
         assert not any(p in ql for p in forbidden), (
             f"{scenario}: forbidden self-referential CoVe question: {q!r}"
         )

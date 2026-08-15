@@ -13,6 +13,8 @@ just the prompt level.
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -69,9 +71,13 @@ class ExtractionResult(BaseModel):
 # Phase 3 — Verification (CoVe) schemas
 # ---------------------------------------------------------------------------
 
-# Closed set of discrepancy types. Keeping it a string (not an Enum) so the
-# model can emit any of these literally in JSON without enum-coercion surprises;
-# the smoke asserts the types it sees are inside this set.
+# Closed set of discrepancy types — kept as a frozenset for O(1) membership
+# checks (smoke + downstream code) and used as the basis of the
+# ``Discrepancy.type`` Literal so the *native API* response_schema ALSO rejects
+# any invented type (third enforcement layer after the instruction list and the
+# smoke assertions). With temp=0.0 + an explicit instruction listing these
+# exact strings, case drift is unlikely; the Literal additionally closes the
+# "model invents 'vendor_typo' / 'weird_charge'" hole at the API layer.
 DISCREPANCY_TYPES = frozenset(
     {
         "amount_mismatch",
@@ -89,12 +95,25 @@ class Discrepancy(BaseModel):
     """A single discrepancy the Verification agent flags.
 
     Anti-hallucination posture: every field is Optional so a flag can say "we
-    saw a mismatch" without inventing values the agent could not source. The
-    ``type`` should be one of DISCREPANCY_TYPES; ``invoice_value`` / ``bank_value``
-    echo exactly what each side said (as strings to avoid float-repr drift).
+    saw a mismatch" without inventing values the agent could not source.
+    ``type`` is a Literal bound to DISCREPANCY_TYPES so the native API
+    response_schema rejects invented discrepancy kinds at the model layer;
+    ``invoice_value`` / ``bank_value`` echo exactly what each side said (as
+    strings to avoid float-repr drift).
     """
 
-    type: str | None = None
+    type: (
+        Literal[
+            "amount_mismatch",
+            "vendor_mismatch",
+            "date_mismatch",
+            "invoice_number_mismatch",
+            "duplicate_payment",
+            "no_bank_match",
+            "extra_invoice_line",
+        ]
+        | None
+    ) = None
     description: str | None = None
     invoice_value: str | None = None
     bank_value: str | None = None
