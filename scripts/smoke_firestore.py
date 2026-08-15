@@ -267,6 +267,29 @@ async def main() -> None:
     )
     print(_ck("[6] idempotency: duplicate start_invoice returned None (no re-extract/re-verify)"))
 
+    # 6b. idempotency under CONCURRENCY — two simultaneous start_invoice
+    # calls on a fresh {run_id, invoice_id} must see exactly one winner.
+    # This proves the atomic ref.create() fence closes the race that a
+    # sequential dup test cannot see (Gate 4 finding #1). Under Pub/Sub
+    # at-least-once redelivery across two Cloud Run instances both miss
+    # the optimistic get() but only one create() succeeds.
+    invoice_id2 = f"{invoice_id}_race"
+    r_a, r_b = await asyncio.gather(
+        store2.start_invoice(
+            run_id=run_id, invoice_id=invoice_id2, source_hash="race-a"
+        ),
+        store2.start_invoice(
+            run_id=run_id, invoice_id=invoice_id2, source_hash="race-b"
+        ),
+    )
+    winners = sum(1 for r in (r_a, r_b) if r is not None)
+    assert winners == 1, (
+        f"idempotency under CONCURRENCY VIOLATED: expected exactly 1 winner "
+        f"of 2 simultaneous start_invoice calls, got {winners}. "
+        f"r_a is None={r_a is None}, r_b is None={r_b is None}"
+    )
+    print(_ck("[6b] concurrent idempotency: exactly 1 of 2 simultaneous starts won (atomic create)"))
+
     # 7. shared memory write + read + merge -------------------------------
     vendor_key = GT_VENDOR
     payload1 = {
@@ -308,6 +331,7 @@ async def main() -> None:
 
     # 9. cleanup so the live DB is not polluted ---------------------------
     await store2.delete_invoice(run_id=run_id, invoice_id=invoice_id)
+    await store2.delete_invoice(run_id=run_id, invoice_id=invoice_id2)
     await store2.delete_run(run_id=run_id)
     await mem.delete_fact(namespace="vendor", key=vendor_key)
     # verify cleanup

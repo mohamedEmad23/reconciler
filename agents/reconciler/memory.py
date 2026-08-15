@@ -36,6 +36,7 @@ from datetime import timezone
 from typing import Any
 from typing import Optional
 
+from google.api_core.exceptions import AlreadyExists  # noqa: E402
 from google.cloud import firestore  # noqa: E402 (LSP noise — package is installed)
 
 from . import config
@@ -134,7 +135,12 @@ class RunsStore:
     ) -> dict[str, Any]:
         """Create a run record. Idempotent on ``run_id`` — re-calling with
         the same id does NOT overwrite (returns existing doc) so a
-        redelivered trigger cannot reset the run."""
+        redelivered trigger cannot reset the run.
+
+        Atomicity: uses ``ref.create()`` (409 on collision) rather than
+        ``ref.set()``, so two concurrent workers that both miss the
+        optimistic ``get()`` check cannot both win — exactly one ``create``
+        succeeds and the loser re-reads and returns the existing doc."""
         ref = self.client.collection(RUNS_COLLECTION).document(run_id)
         snap = await ref.get()
         if snap.exists:
@@ -149,8 +155,13 @@ class RunsStore:
             "completed_count": 0,
             "failed_count": 0,
         }
-        await ref.set(data)
-        return data
+        try:
+            await ref.create(data)  # atomic — 409 if a concurrent worker won
+            return data
+        except AlreadyExists:
+            # A concurrent trigger beat us; return its doc, never reset it.
+            snap = await ref.get()
+            return snap.to_dict()  # type: ignore[return-value]
 
     async def end_run(
         self,
@@ -219,7 +230,13 @@ class RunsStore:
         Scheduler re-fire, or a duplicate queue entry all hit the second
         branch and never re-run extraction/verification for the same
         invoice in the same run.
-        """
+
+        Atomicity: uses ``ref.create()`` (409 on collision) rather than
+        ``ref.set()`` — under at-least-once Pub/Sub redelivery two Cloud
+        Run instances can both miss the optimistic ``get()`` check, but
+        only one ``create()`` succeeds. The loser catches ``AlreadyExists``
+        and returns ``None`` so the caller skips. This is the fence that
+        the sequenced smoke (step 6) cannot otherwise prove."""
         doc_id = self.invoice_doc_id(run_id, invoice_id)
         ref = self.client.collection(RUN_INVOICES_COLLECTION).document(doc_id)
         snap = await ref.get()
@@ -237,8 +254,12 @@ class RunsStore:
             "updated_at": _SERVER_NOW,
             "error": None,
         }
-        await ref.set(data)
-        return data
+        try:
+            await ref.create(data)  # atomic — 409 if a concurrent worker won
+            return data
+        except AlreadyExists:
+            # A redelivered message beat us; treat as already-processed.
+            return None
 
     async def get_invoice_state(
         self,
