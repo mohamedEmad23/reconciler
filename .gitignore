@@ -11,3 +11,12 @@ wheels/
 
 # Deepwork local state (git-local, OpenCode-readable via .ignore)
 .slim/deepwork/
+
+# Credentials — MUST never be committed (server-side defense: .gcloudignore
+# also excludes these from the Cloud Build source upload, but .gitignore is the
+# repo-level guard so a stray key copied into the tree cannot be committed).
+keys/
+*_secret*.json
+*reconciler-sa*.json
+*oauth_tokens*.json
+client_secret*.json

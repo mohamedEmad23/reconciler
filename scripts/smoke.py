@@ -11,7 +11,7 @@ Run (note the Vertex-AI env vars + SA creds; the same env vars are set on the
 Cloud Run service via `--set-env-vars`):
 
   GOOGLE_APPLICATION_CREDENTIALS=$HOME/keys/reconciler-sa.json \
-  GOOGLEGENAI_USE_VERTEXAI=1 \
+  GOOGLE_GENAI_USE_VERTEXAI=1 \
   GOOGLE_CLOUD_PROJECT=reconciler-mohammed-emad \
   GOOGLE_CLOUD_LOCATION=us-central1 \
   uv run python scripts/smoke.py
