@@ -98,7 +98,7 @@ def test_before_model_callback_pii():
     llm_request.contents = [content]
     llm_request.config = config_obj
 
-    result = before_model_callback_pii(None, llm_request)
+    result = before_model_callback_pii(callback_context=None, llm_request=llm_request)
 
     assert result is None, "before_model_callback must return None (let model proceed)"
     part_text = llm_request.contents[0].parts[0].text
@@ -162,7 +162,7 @@ def test_hitl_tier1_callback_state_annotation():
     mock_content.parts = [mock_part]
     mock_response.content = mock_content
 
-    result = callback(mock_ctx, mock_response)
+    result = callback(callback_context=mock_ctx, llm_response=mock_response)
 
     assert result is None, "after_model_callback must return None (flag, don't block)"
     assert "hitl_flag_extraction" in mock_ctx.state, "low-confidence flag not set in ctx.state"
@@ -181,7 +181,7 @@ def test_hitl_tier1_callback_state_annotation():
     mock_response2 = MagicMock()
     mock_response2.content = mock_content2
 
-    callback(mock_ctx2, mock_response2)
+    callback(callback_context=mock_ctx2, llm_response=mock_response2)
     assert len(mock_ctx2.state) == 0, "high-confidence should NOT set a flag"
 
     print("[4] HITL Tier-1 callback PASS — low conf → ctx.state['hitl_flag_*'] set; high conf → no flag")
@@ -205,7 +205,7 @@ def test_hitl_tier2_request_confirmation():
     mock_tc = MagicMock()
     mock_tc.function_call_id = "test_fc_id_123"
 
-    result = gate(mock_tool, mock_args, mock_tc)
+    result = gate(tool=mock_tool, args=mock_args, tool_context=mock_tc)
 
     assert result is None, "before_tool_callback must return None (let framework handle)"
     mock_tc.request_confirmation.assert_called_once(), "request_confirmation NOT called"
@@ -220,7 +220,7 @@ def test_hitl_tier2_request_confirmation():
     mock_tool_other.name = "retrieve_invoice"
     mock_tc2 = MagicMock()
     mock_tc2.function_call_id = "test_fc_id_456"
-    gate(mock_tool_other, mock_args, mock_tc2)
+    gate(tool=mock_tool_other, args=mock_args, tool_context=mock_tc2)
     mock_tc2.request_confirmation.assert_not_called(), "non-high-stakes tool should NOT pause"
 
     print("[5] HITL Tier-2 gate PASS — send_digest_email → request_confirmation fires; other tools → no pause")

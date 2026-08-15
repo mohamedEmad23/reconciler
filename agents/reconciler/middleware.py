@@ -69,7 +69,7 @@ def redact_pii(text: str | None) -> str | None:
 
 
 def before_model_callback_pii(
-    ctx: Any,  # CallbackContext — unused (PII redaction is stateless)
+    callback_context: Any,  # CallbackContext — unused (PII redaction is stateless)
     llm_request: LlmRequest,
 ) -> LlmResponse | None:
     """ADK ``before_model_callback`` — redact PII from the request before the model sees it.
@@ -144,7 +144,7 @@ def make_after_model_callback_hitl(
     """
 
     def after_model_callback_hitl(
-        ctx: Any,
+        callback_context: Any,
         llm_response: LlmResponse,
     ) -> LlmResponse | None:
         # Extract the first text part from the response.
@@ -158,7 +158,7 @@ def make_after_model_callback_hitl(
         confidence = _extract_confidence(text)
         if confidence is not None and confidence < CONFIDENCE_THRESHOLD:
             flag_key = f"{HITL_FLAG_PREFIX}{agent_name}"
-            ctx.state[flag_key] = {
+            callback_context.state[flag_key] = {
                 "stage": agent_name,
                 "reason": "low_confidence",
                 "confidence": confidence,
@@ -230,13 +230,21 @@ def with_safety_rails(agent: Any) -> Any:
     callbacks attached.
 
     Uses ``model_copy(update=...)`` — a shallow Pydantic copy that preserves
-    all existing fields (tools, output_schema, mode, output_key, …) and only
-    sets the two new callback lists. ``model_post_init`` does NOT re-run on a
-    copy, so sub_agents wrapping is untouched.
+    all existing fields (tools, output_schema, mode, output_key, …). It
+    **prepends** the PII callback (so redaction runs before any pre-existing
+    ``before_model_callback``) and **appends** the HITL callback (so flagging
+    runs after any pre-existing ``after_model_callback``) — never replaces an
+    existing callback chain. ``model_post_init`` does NOT re-run on a copy, so
+    sub_agents wrapping is untouched.
     """
+    existing_before = list(getattr(agent, "before_model_callback", None) or [])
+    existing_after = list(getattr(agent, "after_model_callback", None) or [])
     return agent.model_copy(
         update={
-            "before_model_callback": [before_model_callback_pii],
-            "after_model_callback": [make_after_model_callback_hitl(agent.name)],
+            "before_model_callback": [before_model_callback_pii, *existing_before],
+            "after_model_callback": [
+                *existing_after,
+                make_after_model_callback_hitl(agent.name),
+            ],
         },
     )
