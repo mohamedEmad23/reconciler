@@ -25,6 +25,7 @@ Reliability properties (each proved by a smoke):
 
 from __future__ import annotations
 
+import asyncio
 import csv
 import difflib
 import json
@@ -44,6 +45,7 @@ from google.genai import types
 from . import config
 from .categorization import categorization_agent
 from .extraction import extraction_agent
+from .resilience import CircuitBreaker, guard, publish_to_dlq
 from .memory import RunsStore, SharedMemory
 from .middleware import CONFIDENCE_THRESHOLD, DISPUTE_THRESHOLD, with_safety_rails
 from .reconciliation import reconciliation_agent
@@ -118,6 +120,19 @@ class Pipeline:
         self._reporting = with_safety_rails(reporting_agent).model_copy(
             update={"tools": []}
         )
+        # Resilience (P10): per-dependency circuit breakers + guarded calls.
+        self._vertex_breaker = CircuitBreaker(dependency="vertex-ai")
+        self._bank_breaker = CircuitBreaker(dependency="bank-statement")
+
+    async def _read_bank(self) -> str:
+        """Bank-statement read behind watchdog + breaker + retry (P10)."""
+        return await guard(
+            "bank-statement",
+            breaker=self._bank_breaker,
+            timeout_s=10.0,
+            max_attempts=4,
+            base_s=0.5,
+        )(lambda: asyncio.to_thread(self.bank_csv.read_text))
 
     # ------------------------------------------------------------------
     # LLM plumbing
@@ -155,18 +170,33 @@ class Pipeline:
         await runner.session_service.create_session(
             app_name=config.APP_NAME, user_id="pipeline", session_id=session_id
         )
-        final_text: str | None = None
-        async for event in runner.run_async(
-            user_id="pipeline",
-            session_id=session_id,
-            new_message=types.Content(role="user", parts=parts),
-        ):
-            if event.is_final_response() and final_text is None:
-                if event.content and event.content.parts:
-                    for part in event.content.parts:
-                        if part.text:
-                            final_text = part.text
-                            break
+
+        async def _drive() -> str | None:
+            final_text: str | None = None
+            async for event in runner.run_async(
+                user_id="pipeline",
+                session_id=session_id,
+                new_message=types.Content(role="user", parts=parts),
+            ):
+                if event.is_final_response() and final_text is None:
+                    if event.content and event.content.parts:
+                        for part in event.content.parts:
+                            if part.text:
+                                final_text = part.text
+                                break
+            return final_text
+
+        # P10 resilience: every LLM call runs behind watchdog + breaker +
+        # adaptive retry. Vertex timeouts/quota blips retry with backoff;
+        # a hard-failing Vertex trips the breaker and fail-isolates the
+        # invoice instead of stalling the whole run.
+        final_text = await guard(
+            "vertex-ai",
+            breaker=self._vertex_breaker,
+            timeout_s=180.0,
+            max_attempts=3,
+            base_s=2.0,
+        )(_drive)
         if not final_text:
             raise RuntimeError(f"{hint}: agent returned no final text")
         return self._json_from_text(final_text)
@@ -205,7 +235,7 @@ class Pipeline:
         return result
 
     async def _stage_verification(self, invoice: dict[str, Any]) -> dict[str, Any]:
-        bank_text = self.bank_csv.read_text()
+        bank_text = await self._read_bank()
         prompt = (
             "Draft extraction (from the Extraction stage):\n"
             f"```json\n{json.dumps(invoice, indent=2)}\n```\n\n"
@@ -246,7 +276,7 @@ class Pipeline:
         ``rule_fired`` strings in the provenance trail (e.g.
         'fuzzy_match(vendor, bank_row) @ 0.87').
         """
-        bank_text = self.bank_csv.read_text()
+        bank_text = await self._read_bank()
         rows: list[dict[str, Any]] = []
         for line in bank_text.splitlines()[1:]:
             if not line.strip():
@@ -797,6 +827,15 @@ class Pipeline:
                     error=f"{stage}: {exc}",
                 )
                 await self.store.increment_counts(run_id=run_id, failed=1)
+                # P10: application-level poison routing — the invoice is
+                # ALSO published to the DLQ topic (never raises; the
+                # Firestore dlq status above is the durable record).
+                await publish_to_dlq(
+                    run_id=run_id,
+                    invoice_id=invoice_id,
+                    error=f"{stage}: {exc}",
+                    stage=stage,
+                )
                 return await self.store.get_invoice_state(
                     run_id=run_id, invoice_id=invoice_id
                 )

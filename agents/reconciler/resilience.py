@@ -294,7 +294,9 @@ async def publish_to_dlq(
             }
         ).encode()
         future = client.publish(topic_path, payload)
-        message_id = await future
+        # pubsub returns a concurrent.futures-style Future (NOT awaitable)
+        # — resolve it on a worker thread so the event loop never blocks.
+        message_id = await asyncio.to_thread(future.result, 15.0)
         logger.warning(
             "published to DLQ: run=%s invoice=%s stage=%s message_id=%s",
             run_id, invoice_id, stage, message_id,
