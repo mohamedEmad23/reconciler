@@ -17,6 +17,7 @@ Safety rails (Phase 6):
 Specialists online:
   Phase 2  — Extraction     (PDF -> structured invoice JSON, temp=0.0, output_schema)
   Phase 3  — Verification   (CoVe cross-check against bank-statement CSV)
+  P9       — Resolution     (closed-loop: resolve-then-escalate lanes + dispute drafts)
   Phase 6  — Reporting      (weekly digest email, FINAL HITL Tier-2 gate before send)
   Phase 3.5 — Intake        (Gmail OAuth via Secret Manager / local dir tools)
   Phase 3.5 — Categorization(chart of accounts, substance-over-keyword)
@@ -39,6 +40,7 @@ from .intake import intake_agent
 from .middleware import with_safety_rails
 from .reconciliation import reconciliation_agent
 from .reporting import reporting_agent
+from .resolution import resolution_agent
 from .verification import verification_agent
 
 # ---------------------------------------------------------------------------
@@ -49,6 +51,7 @@ from .verification import verification_agent
 # ---------------------------------------------------------------------------
 _extraction_wrapped = with_safety_rails(extraction_agent)
 _verification_wrapped = with_safety_rails(verification_agent)
+_resolution_wrapped = with_safety_rails(resolution_agent)
 _categorization_wrapped = with_safety_rails(categorization_agent)
 _reconciliation_wrapped = with_safety_rails(reconciliation_agent)
 # reporting_agent keeps its own before_tool_callback (HITL Tier 2) and also
@@ -70,6 +73,12 @@ _SUPERVISOR_INSTRUCTION = (
     "  - verification : cross-check extracted invoice against bank-statement CSV\n"
     "                   using Chain-of-Verification (CoVe) — flags discrepancies,\n"
     "                   never silently trusts the extraction draft.\n"
+    "  - resolution   : closed-loop resolution — for each flagged discrepancy\n"
+    "                   decides resolve (apply correction + re-verify), dispute\n"
+    "                   (draft corrective email for human approval — NEVER\n"
+    "                   sends), or escalate (abstain with reason). Resolved\n"
+    "                   only counts when an independent re-verification pass\n"
+    "                   confirms the discrepancy is gone.\n"
     "  - categorization: assign every line item a chart-of-accounts code;\n"
     "                   never invents a code it cannot justify.\n"
     "  - reconciliation: final per-invoice verdict — recomputes the monetary\n"
@@ -78,13 +87,15 @@ _SUPERVISOR_INSTRUCTION = (
     "                   a FINAL HITL gate pauses before any email is sent.\n"
     "Per pipeline stage you delegate to the right specialist and forward its\n"
     "output to the next stage. Do NOT do intake, extraction, verification,\n"
-    "categorization, reconciliation, or reporting yourself — delegate them.\n"
+    "resolution, categorization, reconciliation, or reporting yourself —\n"
+    "delegate them.\n"
     "\n"
     "When responding to a run trigger where no invoices have been ingested yet,\n"
     "respond with a single JSON object and nothing else, of shape:\n"
     '  {"status": "ack", "run_id": "<short hex>", "plan": [<stage>, ...]}\n'
     "where `plan` is the ordered list of pipeline stages you WILL execute\n"
-    "(intake, extraction, verification, categorization, reconciliation, reporting).\n"
+    "(intake, extraction, verification, resolution, categorization,\n"
+    "reconciliation, reporting).\n"
     "Do NOT emit free-form prose. Do NOT invent invoice data — none exists yet."
 )
 
@@ -95,6 +106,7 @@ _SUB_AGENTS = [  # noqa: N806
     _intake_wrapped,
     _extraction_wrapped,
     _verification_wrapped,
+    _resolution_wrapped,
     _categorization_wrapped,
     _reconciliation_wrapped,
     _reporting_wrapped,

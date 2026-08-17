@@ -90,6 +90,18 @@ DISCREPANCY_TYPES = frozenset(
     }
 )
 
+# Canonical Pydantic Literal form of DISCREPANCY_TYPES (single definition;
+# ReportDiscrepancyType and the resolution schemas alias it).
+DiscrepancyType = Literal[
+    "amount_mismatch",
+    "vendor_mismatch",
+    "date_mismatch",
+    "invoice_number_mismatch",
+    "duplicate_payment",
+    "no_bank_match",
+    "extra_invoice_line",
+]
+
 
 class Discrepancy(BaseModel):
     """A single discrepancy the Verification agent flags.
@@ -148,17 +160,9 @@ class VerificationResult(BaseModel):
 # Phase 6 — Reporting + Safety schemas
 # ---------------------------------------------------------------------------
 
-# Discrepancy type strings allowed in the digest (mirrors DISCREPANCY_TYPES but
-# represented as a Pydantic Literal for the reporting agent's output schema).
-ReportDiscrepancyType = Literal[
-    "amount_mismatch",
-    "vendor_mismatch",
-    "date_mismatch",
-    "invoice_number_mismatch",
-    "duplicate_payment",
-    "no_bank_match",
-    "extra_invoice_line",
-]
+# Discrepancy type strings allowed in the digest (aliases the canonical
+# DiscrepancyType Literal; kept for Phase 6 import compatibility).
+ReportDiscrepancyType = DiscrepancyType
 
 
 class FlaggedItem(BaseModel):
@@ -290,3 +294,72 @@ class ReconciliationResult(BaseModel):
     invariants_checked: list[str] = Field(default_factory=list)
     invariants_passed: bool = False
     confidence: float = Field(..., ge=0.0, le=1.0)
+
+
+# ---------------------------------------------------------------------------
+# Closed-loop resolution (design doc §1) — resolve-then-escalate, never flag-and-stop
+# ---------------------------------------------------------------------------
+
+ResolutionLane = Literal["resolve", "dispute", "escalate"]
+ResolutionOutcome = Literal["resolved", "disputed", "escalated"]
+HumanDecision = Literal["approved", "rejected"]
+
+
+class ResolutionDecision(BaseModel):
+    """The auditable WHY of a resolution lane choice (design doc §1.2).
+
+    Pure function inputs: f(discrepancy_type, confidence, evidence_available,
+    action_risk) → lane. ``rationale`` is REQUIRED — a lane without a reason
+    is unauditable.
+    """
+
+    discrepancy_type: DiscrepancyType | None = None
+    lane: ResolutionLane | None = None
+    confidence: float | None = None
+    evidence_refs: list[str] = Field(default_factory=list)  # memory keys / source hashes consulted
+    rationale: str | None = None  # REQUIRED — the "why" (provenance)
+
+
+class DisputeDraft(BaseModel):
+    """A corrective email DRAFTED but never sent. The resolution agent has no
+    send capability — only the HITL approval surface (design doc §5) commits
+    the external side effect after an explicit human click."""
+
+    recipient: str | None = None
+    subject: str | None = None
+    body: str | None = None
+    amount_at_risk: float | None = None  # feeds dollars_recovered (approved-only)
+
+
+class ResolutionAction(BaseModel):
+    """One discrepancy's journey through the closed loop.
+
+    outcome=resolved is ONLY permitted when ``recheck_matched`` shows an
+    independent re-verification pass confirmed the discrepancy is gone
+    (design doc §1.6 — never self-certify).
+    """
+
+    decision: ResolutionDecision | None = None
+    corrected_invoice: Invoice | None = None  # only for lane=resolve
+    dispute_draft: DisputeDraft | None = None  # only for lane=dispute
+    recheck_matched: bool | None = None  # from the independent re-verification pass
+    outcome: ResolutionOutcome | None = None
+
+
+class ProvenanceEntry(BaseModel):
+    """Audit trail entry for a resolved/disputed/escalated discrepancy
+    (design doc §3). Chains extraction evidence → CoVe verification →
+    resolution decision → re-verification → (optional) human decision."""
+
+    discrepancy_type: DiscrepancyType | None = None
+    lane: ResolutionLane | None = None
+    extraction_hash: str | None = None  # source_hash from ExtractionResult
+    verification_questions: list[str] = Field(default_factory=list)  # CoVe questions
+    verification_answers: list[str] = Field(default_factory=list)  # CoVe answers (independent pass)
+    memory_keys_consulted: list[str] = Field(default_factory=list)  # vendor/prior_invoice lookups
+    rule_fired: str | None = None  # e.g. "fuzzy_match(vendor, alias) @ 0.94"
+    resolution_rationale: str | None = None  # from ResolutionDecision.rationale
+    recheck_matched: bool | None = None  # the closing-the-loop evidence
+    human_decision: HumanDecision | None = None  # only if disputed
+    trace_id: str | None = None  # Cloud Trace linkage (click a decision → see the span)
+    timestamp: str | None = None

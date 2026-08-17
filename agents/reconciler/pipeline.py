@@ -25,8 +25,11 @@ Reliability properties (each proved by a smoke):
 
 from __future__ import annotations
 
+import csv
+import difflib
 import json
 import logging
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -45,6 +48,7 @@ from .memory import RunsStore, SharedMemory
 from .middleware import CONFIDENCE_THRESHOLD, with_safety_rails
 from .reconciliation import reconciliation_agent
 from .reporting import reporting_agent
+from .resolution import resolution_agent
 from .tools import intake_tools
 from .verification import verification_agent
 
@@ -56,6 +60,7 @@ PER_INVOICE_STAGES = (
     "intake",
     "extraction",
     "verification",
+    "resolution",
     "categorization",
     "reconciliation",
 )
@@ -76,6 +81,11 @@ class PipelineResult:
     flagged_count: int = 0
     digest: dict[str, Any] | None = None
     skipped: bool = False  # True when a completed run was re-triggered unchanged
+    # Closed-loop money metrics (anti-gaming §2/§9): dollars_recovered counts
+    # ONLY approved+re-verified outcomes (stays 0 until the P13 approval
+    # surface exists); dollars_at_risk is drafted-but-unapproved visibility.
+    dollars_recovered: float = 0.0
+    dollars_at_risk: float = 0.0
 
 
 class Pipeline:
@@ -99,6 +109,7 @@ class Pipeline:
         # posture to the Supervisor path in agent.py.
         self._extraction = with_safety_rails(extraction_agent)
         self._verification = with_safety_rails(verification_agent)
+        self._resolution = with_safety_rails(resolution_agent)
         self._categorization = with_safety_rails(categorization_agent)
         self._reconciliation = with_safety_rails(reconciliation_agent)
         # Reporting composition clone: tools stripped so the model composes
@@ -210,6 +221,194 @@ class Pipeline:
             hint="verification",
         )
 
+    # ------------------------------------------------------------------
+    # Closed-loop resolution (design doc §1) — deterministic evidence is
+    # computed in PYTHON; the agent DECIDES + DRAFTS; the pipeline EXECUTES
+    # + RE-VERIFIES. The agent never mutates data or sends anything.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _parse_date(value: str | None) -> datetime | None:
+        if not value:
+            return None
+        try:
+            return datetime.strptime(str(value)[:10], "%Y-%m-%d")
+        except ValueError:
+            return None
+
+    async def _evidence_packet(
+        self, invoice: dict[str, Any], verification: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Deterministic, auditable evidence for the resolution decision.
+
+        Everything here is recomputed from raw inputs in Python (no LLM):
+        fuzzy scores, memory facts, day deltas. These become the
+        ``rule_fired`` strings in the provenance trail (e.g.
+        'fuzzy_match(vendor, bank_row) @ 0.87').
+        """
+        bank_text = self.bank_csv.read_text()
+        rows: list[dict[str, Any]] = []
+        for line in bank_text.splitlines()[1:]:
+            if not line.strip():
+                continue
+            try:
+                date, desc, amount, *_ = next(csv.reader([line]))
+            except (StopIteration, csv.Error):
+                continue
+            rows.append(
+                {"date": date.strip(), "description": desc.strip(), "amount": amount.strip()}
+            )
+
+        packet: dict[str, Any] = {
+            "bank_rows": rows,
+            "vendor_alias_fact": None,
+            "prior_invoice_fact": None,
+            "best_vendor_row": None,
+            "number_fuzzy": None,
+            "date_delta_days": None,
+            "amount_rows": [],
+        }
+
+        vendor = invoice.get("vendor")
+        inv_no = invoice.get("invoice_number")
+        inv_date = self._parse_date(invoice.get("invoice_date"))
+
+        # Shared-memory facts (miss → None is the anti-hallucination signal).
+        if vendor:
+            packet["vendor_alias_fact"] = await self.memory.get_fact(
+                namespace="vendor", key=vendor
+            )
+        if inv_no:
+            packet["prior_invoice_fact"] = await self.memory.get_fact(
+                namespace="prior_invoice", key=inv_no
+            )
+
+        # Best fuzzy vendor↔row match: max(difflib ratio, vendor-token overlap).
+        # Token overlap = fraction of vendor name tokens present in the row —
+        # the honest number when the vendor name is a substring of the memo.
+        if vendor:
+            vendor_tokens = [t for t in re.split(r"\W+", vendor.lower()) if len(t) > 2]
+            best_row, best_score = None, 0.0
+            for row in rows:
+                ratio = difflib.SequenceMatcher(
+                    None, vendor.lower(), row["description"].lower()
+                ).ratio()
+                row_tokens = set(re.split(r"\W+", row["description"].lower()))
+                overlap = (
+                    sum(1 for t in vendor_tokens if t in row_tokens) / len(vendor_tokens)
+                    if vendor_tokens
+                    else 0.0
+                )
+                score = max(ratio, overlap)
+                if score > best_score:
+                    best_row, best_score = row, score
+            if best_row is not None:
+                packet["best_vendor_row"] = {**best_row, "fuzzy": round(best_score, 2)}
+                # Invoice-number fuzzy match inside that row (OCR 0↔O, 1↔l).
+                if inv_no:
+                    tokens = re.findall(r"[A-Za-z0-9-]{4,}", best_row["description"])
+                    token_scores = {
+                        t: round(
+                            difflib.SequenceMatcher(
+                                None, str(inv_no).lower(), t.lower()
+                            ).ratio(),
+                            2,
+                        )
+                        for t in tokens
+                    }
+                    top = max(token_scores.items(), key=lambda kv: kv[1]) if token_scores else None
+                    if top:
+                        packet["number_fuzzy"] = {"token": top[0], "score": top[1]}
+                # Invoice-date vs bank-posting-date delta (1-3d is normal latency).
+                row_date = self._parse_date(best_row.get("date"))
+                if inv_date and row_date:
+                    packet["date_delta_days"] = (row_date - inv_date).days
+                # Amount rows near the invoice total (±$0.02 exact; transposition check).
+                try:
+                    inv_total = float(invoice.get("total") or 0)
+                except (TypeError, ValueError):
+                    inv_total = 0.0
+                for row in rows:
+                    try:
+                        amt = abs(float(row["amount"]))
+                    except ValueError:
+                        continue
+                    digits_a = sorted(re.sub(r"[^0-9]", "", f"{inv_total:.2f}"))
+                    digits_b = sorted(re.sub(r"[^0-9]", "", f"{amt:.2f}"))
+                    transposition = (
+                        bool(inv_total)
+                        and amt != inv_total
+                        and digits_a == digits_b
+                    )
+                    packet["amount_rows"].append(
+                        {
+                            **row,
+                            "abs_amount": amt,
+                            "exact": abs(amt - inv_total) <= 0.02 if inv_total else None,
+                            "digit_transposition": transposition,
+                        }
+                    )
+        return packet
+
+    async def _stage_resolution(
+        self,
+        extraction: dict[str, Any],
+        verification: dict[str, Any],
+        evidence: dict[str, Any],
+    ) -> dict[str, Any]:
+        prompt = (
+            "A discrepancy was flagged during verification. Decide the "
+            "resolution lane and produce the action artifact.\n\n"
+            f"Discrepancies flagged by CoVe verification:\n"
+            f"```json\n{json.dumps(verification.get('discrepancies', []), indent=2)}\n```\n"
+            f"Verification confidence: {verification.get('confidence')}\n\n"
+            f"CoVe trace (questions/answers):\n"
+            f"{json.dumps(list(zip(verification.get('verification_questions', []), verification.get('verification_answers', []))), indent=2)}\n\n"
+            f"Extracted invoice:\n```json\n{json.dumps(extraction.get('invoice', {}), indent=2)}\n```\n\n"
+            f"DETERMINISTIC EVIDENCE PACKET (computed in Python from the raw "
+            f"bank CSV + shared memory — the only evidence that exists):\n"
+            f"```json\n{json.dumps(evidence, indent=2)}\n```\n\n"
+            "Apply the decision table. Emit ResolutionAction."
+        )
+        return await self._run_agent(
+            self._resolution,
+            [types.Part.from_text(text=prompt)],
+            hint="resolution",
+        )
+
+    async def _close_resolution(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Execute the decided lane and CLOSE THE LOOP by re-verification.
+
+        Anti-gaming guard (design doc §1.6/§9): ``resolved`` is only ever
+        set when an INDEPENDENT re-verification pass confirms the target
+        discrepancy is gone. A failed re-check demotes to ``escalated`` —
+        the resolver can never self-certify.
+        """
+        decision = payload.get("decision") or {}
+        lane = decision.get("lane")
+        target_type = decision.get("discrepancy_type")
+
+        if lane == "resolve" and payload.get("corrected_invoice"):
+            corrected = payload["corrected_invoice"]
+            recheck = await self._stage_verification(corrected)
+            payload["recheck"] = recheck
+            payload["recheck_matched"] = bool(recheck.get("matched"))
+            discrepancies = recheck.get("discrepancies") or []
+            gone = all(d.get("type") != target_type for d in discrepancies)
+            payload["outcome"] = (
+                "resolved"
+                if (recheck.get("matched") or gone)
+                else "escalated"
+            )
+        elif lane == "dispute":
+            # Draft only — the human approval surface (P13) is the ONLY
+            # component that can commit the send. dollars_recovered is NOT
+            # incremented here (anti-gaming §2: approved + re-verified only).
+            payload["outcome"] = "disputed"
+        else:
+            payload["outcome"] = "escalated"
+        return payload
+
     async def _stage_categorization(
         self, invoice: dict[str, Any], vendor_hints: list[str]
     ) -> dict[str, Any]:
@@ -232,12 +431,21 @@ class Pipeline:
         extraction: dict[str, Any],
         verification: dict[str, Any],
         categorization: dict[str, Any],
+        resolution: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        resolution_block = (
+            f"Resolution (closed loop — note the outcome; discrepancies the "
+            f"resolver fixed are already applied to the invoice above):\n"
+            f"```json\n{json.dumps(resolution, indent=2)}\n```\n\n"
+            if resolution
+            else ""
+        )
         prompt = (
             "Final reconciliation. Recompute every invariant yourself — do "
             "NOT assume prior stages are right.\n\n"
             f"Extraction:\n```json\n{json.dumps(extraction, indent=2)}\n```\n\n"
             f"Verification:\n```json\n{json.dumps(verification, indent=2)}\n```\n\n"
+            f"{resolution_block}"
             f"Categorization:\n```json\n{json.dumps(categorization, indent=2)}\n```\n\n"
             "Emit ReconciliationResult."
         )
@@ -397,6 +605,56 @@ class Pipeline:
                     payload = await self._stage_verification(
                         data["extraction"]["invoice"]
                     )
+                elif stage == "resolution":
+                    verification_payload = data["verification"]
+                    if (
+                        verification_payload.get("matched")
+                        and not verification_payload.get("discrepancies")
+                    ):
+                        # Clean invoice — nothing to resolve. Abstention is a
+                        # first-class outcome; record it for the audit trail.
+                        payload = {
+                            "decision": {
+                                "lane": "escalate",
+                                "rationale": (
+                                    "no discrepancies flagged by CoVe "
+                                    "verification — nothing to resolve"
+                                ),
+                                "confidence": verification_payload.get(
+                                    "confidence"
+                                ),
+                            },
+                            "outcome": "escalated",
+                            "skipped_no_discrepancies": True,
+                        }
+                    else:
+                        evidence = await self._evidence_packet(
+                            data["extraction"]["invoice"],
+                            verification_payload,
+                        )
+                        payload = await self._stage_resolution(
+                            data["extraction"], verification_payload, evidence
+                        )
+                        payload = await self._close_resolution(payload)
+                    if (
+                        payload.get("outcome") == "resolved"
+                        and payload.get("corrected_invoice")
+                    ):
+                        # Downstream stages (categorization, reconciliation)
+                        # consume the CORRECTED invoice: re-checkpoint the
+                        # extraction stage with the fix applied. checkpoint()
+                        # merges stage data; the duplicate 'extraction' entry
+                        # in stages_done is harmless (forward-only resume).
+                        state = await self.store.checkpoint(
+                            run_id=run_id,
+                            invoice_id=invoice_id,
+                            stage="extraction",
+                            data={
+                                **data["extraction"],
+                                "invoice": payload["corrected_invoice"],
+                            },
+                        )
+                        data = state.get("stages_data") or data
                 elif stage == "categorization":
                     invoice = data["extraction"]["invoice"]
                     vendor = invoice.get("vendor")
@@ -416,6 +674,7 @@ class Pipeline:
                         data["extraction"],
                         data["verification"],
                         data["categorization"],
+                        resolution=data.get("resolution"),
                     )
                 else:  # pragma: no cover — guarded by PER_INVOICE_STAGES
                     break
@@ -533,12 +792,32 @@ class Pipeline:
             if low_conf:
                 rec = dict(rec)
                 rec["low_confidence_flags"] = low_conf
+            # A pending dispute draft awaiting human approval is also a flag.
+            resolution_payload = (s.get("stages_data") or {}).get("resolution") or {}
+            if resolution_payload.get("outcome") == "disputed":
+                rec = dict(rec)
+                rec["pending_dispute"] = resolution_payload.get("dispute_draft")
             invoice_results.append(rec)
         result.flagged_count = sum(
             1
             for r in invoice_results
-            if r.get("verdict") != "matched" or r.get("low_confidence_flags")
+            if r.get("verdict") != "matched"
+            or r.get("low_confidence_flags")
+            or r.get("pending_dispute")
         )
+        # Closed-loop money metrics. dollars_recovered remains 0.0 here by
+        # design: only the HITL approval surface may increment it, and only
+        # for approved disputes + re-verified corrections.
+        at_risk = 0.0
+        for s in completed:
+            resolution_payload = (s.get("stages_data") or {}).get("resolution") or {}
+            draft = resolution_payload.get("dispute_draft") or {}
+            if resolution_payload.get("outcome") == "disputed":
+                try:
+                    at_risk += float(draft.get("amount_at_risk") or 0.0)
+                except (TypeError, ValueError):
+                    pass
+        result.dollars_at_risk = round(at_risk, 2)
 
         # Idempotent digest: a completed run re-triggered keeps its digest
         # (zero recomposition LLM calls on redelivery).
@@ -568,14 +847,19 @@ class Pipeline:
             summary={
                 "digest": result.digest,
                 "flagged_count": result.flagged_count,
+                "dollars_recovered": result.dollars_recovered,
+                "dollars_at_risk": result.dollars_at_risk,
             },
         )
         logger.info(
-            "run %s done: %d/%d completed, %d failed, %d flagged",
+            "run %s done: %d/%d completed, %d failed, %d flagged, "
+            "$%.2f at risk (drafted), $%.2f recovered (approved-only)",
             run_id,
             result.invoices_completed,
             result.invoices_total,
             result.invoices_failed,
             result.flagged_count,
+            result.dollars_at_risk,
+            result.dollars_recovered,
         )
         return result

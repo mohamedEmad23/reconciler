@@ -61,6 +61,7 @@ STAGE_ORDER: tuple[str, ...] = (
     "intake",
     "extraction",
     "verification",
+    "resolution",
     "categorization",
     "reconciliation",
     "reporting",
@@ -187,8 +188,14 @@ class RunsStore:
         run_id: str,
         completed: int = 0,
         failed: int = 0,
+        dollars_recovered: float = 0.0,
     ) -> None:
-        """Atomically bump the run's completed/failed counters."""
+        """Atomically bump the run's counters.
+
+        ``dollars_recovered`` follows the anti-gaming rule (design doc §2/§9):
+        it is ONLY ever incremented for APPROVED disputes and RE-VERIFIED
+        corrections — never for a draft and never for a self-certified flag.
+        """
         ref = self.client.collection(RUNS_COLLECTION).document(run_id)
         if completed:
             await ref.update(
@@ -196,6 +203,10 @@ class RunsStore:
             )
         if failed:
             await ref.update({"failed_count": firestore.Increment(failed)})
+        if dollars_recovered:
+            await ref.update(
+                {"dollars_recovered": firestore.Increment(dollars_recovered)}
+            )
 
     async def get_run(self, *, run_id: str) -> Optional[dict[str, Any]]:
         snap = await self.client.collection(RUNS_COLLECTION).document(

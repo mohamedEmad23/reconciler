@@ -105,6 +105,15 @@ def before_model_callback_pii(
 
 CONFIDENCE_THRESHOLD = 0.7  # below this → flag for human review (no pause)
 
+# Closed-loop resolution thresholds (design doc §1.4 — single source of truth).
+# A judge can read all three constants and see exactly where the agent draws
+# its autonomy lines:
+#   confidence <  0.70              → escalate (Tier-1 HITL flag; already handled)
+#   0.70 <= confidence < 0.90       → dispute: draft corrective action, human approves
+#   confidence >= 0.90 & low risk   → resolve autonomously, then RE-VERIFY
+DISPUTE_THRESHOLD = 0.70  # at/above this (and < RESOLVE) = draft + human approve
+RESOLVE_THRESHOLD = 0.90  # at/above this + low-risk action = auto-resolve + re-verify
+
 # Keys written into ctx.state by the Tier-1 callback. The Supervisor and the
 # Reporting agent read these to decide which items to escalate in the digest.
 HITL_FLAG_PREFIX = "hitl_flag_"
