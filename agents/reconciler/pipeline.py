@@ -30,6 +30,7 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -41,7 +42,7 @@ from . import config
 from .categorization import categorization_agent
 from .extraction import extraction_agent
 from .memory import RunsStore, SharedMemory
-from .middleware import with_safety_rails
+from .middleware import CONFIDENCE_THRESHOLD, with_safety_rails
 from .reconciliation import reconciliation_agent
 from .reporting import reporting_agent
 from .tools import intake_tools
@@ -275,6 +276,60 @@ class Pipeline:
             raise ValueError(f"pdf loading for source {self.source!r} not wired")
         return intake_tools.read_local_pdf(str(self.directory / att["filename"]))
 
+    _LEASE_SECONDS = 600  # a worker holding an in_progress invoice for >10min
+    #   without a checkpoint is presumed crashed — resume allowed.
+
+    @staticmethod
+    def _lease_expired(state: dict[str, Any]) -> bool:
+        """True when an in_progress invoice is stale enough to resume.
+
+        The lease is soft: ``updated_at`` is bumped by every checkpoint,
+        so a live worker keeps it fresh; a crashed worker lets it go stale
+        and the next delivery picks the invoice up mid-timeline.
+        """
+        updated = state.get("updated_at")
+        if not isinstance(updated, datetime):
+            return True  # unresolvable timestamp — prefer resumability
+        age = (datetime.now(timezone.utc) - updated).total_seconds()
+        return age > Pipeline._LEASE_SECONDS
+
+    @staticmethod
+    def _python_recheck(
+        rec: dict[str, Any], data: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Deterministic INV-1/INV-2 backstop — LLM arithmetic is not trusted.
+
+        Recomputes sum(line_items) vs subtotal and subtotal+tax vs total in
+        Python. If the arithmetic fails while the agent claimed ``matched``,
+        the verdict is forced to ``needs_review`` (escalate, never trust).
+        """
+        inv = (data.get("extraction") or {}).get("invoice") or {}
+        items = inv.get("line_items") or []
+        sub, tax, tot = inv.get("subtotal"), inv.get("tax"), inv.get("total")
+        if (
+            not items
+            or not isinstance(sub, (int, float))
+            or not isinstance(tax, (int, float))
+            or not isinstance(tot, (int, float))
+        ):
+            return rec
+        s = sum(
+            i.get("amount") or 0.0
+            for i in items
+            if isinstance(i.get("amount"), (int, float))
+        )
+        ok = abs(s - sub) <= 0.02 and abs(sub + tax - tot) <= 0.02
+        if not ok and rec.get("verdict") == "matched":
+            rec = dict(rec)
+            rec["verdict"] = "needs_review"
+            checked = list(rec.get("invariants_checked") or [])
+            checked.append(
+                "INV-PY-RECHECK: sum(line_items)/subtotal+tax mismatch in Python recompute"
+            )
+            rec["invariants_checked"] = checked
+            rec["invariants_passed"] = False
+        return rec
+
     async def _process_invoice(
         self, *, run_id: str, att: dict[str, Any]
     ) -> dict[str, Any] | None:
@@ -290,10 +345,24 @@ class Pipeline:
             run_id=run_id, invoice_id=invoice_id, source_hash=source_hash
         )
         state = started
-        if state is None:  # already processed or in progress — idempotent skip
+        if state is None:
+            # Lost the create() fence — another worker owns this invoice.
             state = await self.store.get_invoice_state(
                 run_id=run_id, invoice_id=invoice_id
             )
+            if (
+                state is not None
+                and state.get("status") == "in_progress"
+                and not self._lease_expired(state)
+            ):
+                # Concurrent redelivery: the winner is still actively
+                # checkpointing (updated_at fresh). Skip instead of
+                # double-executing stages (M1 race).
+                logger.info(
+                    "invoice %s in progress elsewhere (lease held) — skipping",
+                    invoice_id,
+                )
+                return None
         if state is None:
             raise RuntimeError(f"start_invoice returned no state for {invoice_id}")
         if state.get("status") in COMPLETED_STATUSES + FAILED_STATUSES:
@@ -350,6 +419,9 @@ class Pipeline:
                     )
                 else:  # pragma: no cover — guarded by PER_INVOICE_STAGES
                     break
+                if stage == "reconciliation":
+                    # Deterministic backstop BEFORE persisting the verdict.
+                    payload = self._python_recheck(payload, data)
             except Exception as exc:  # fail-isolation: mark + move on
                 logger.exception(
                     "stage %s failed for invoice %s", stage, invoice_id
@@ -444,12 +516,28 @@ class Pipeline:
         result.invoices_completed = len(completed)
         result.invoices_failed = len(failed)
 
-        invoice_results = [
-            (s.get("stages_data") or {}).get("reconciliation") or {}
-            for s in completed
-        ]
+        invoice_results: list[dict[str, Any]] = []
+        for s in completed:
+            rec = (s.get("stages_data") or {}).get("reconciliation") or {}
+            # Honor HITL Tier-1 in batch mode (M2): the per-agent callback
+            # flags low confidence in its throwaway session; the pipeline
+            # re-derives the same signal from the persisted stage payloads
+            # so a low-confidence invoice escalates even when matched.
+            low_conf = [
+                {"stage": st, "confidence": p["confidence"]}
+                for st, p in (s.get("stages_data") or {}).items()
+                if isinstance(p, dict)
+                and isinstance(p.get("confidence"), (int, float))
+                and p["confidence"] < CONFIDENCE_THRESHOLD
+            ]
+            if low_conf:
+                rec = dict(rec)
+                rec["low_confidence_flags"] = low_conf
+            invoice_results.append(rec)
         result.flagged_count = sum(
-            1 for r in invoice_results if r.get("verdict") != "matched"
+            1
+            for r in invoice_results
+            if r.get("verdict") != "matched" or r.get("low_confidence_flags")
         )
 
         # Idempotent digest: a completed run re-triggered keeps its digest
@@ -466,6 +554,12 @@ class Pipeline:
             result.digest = await self._stage_reporting(
                 invoice_results, result.invoices_completed
             )
+        # Hard clamp (never trust a prompt to keep a safety property):
+        # batch mode has no human to approve the HITL Tier-2 pause, so the
+        # digest is ALWAYS composed-not-sent.
+        if isinstance(result.digest, dict):
+            result.digest["email_sent"] = False
+            result.digest["email_blocked_by_hitl"] = True
 
         status = "completed" if not failed else "completed_with_errors"
         await self.store.end_run(
