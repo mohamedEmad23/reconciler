@@ -26,7 +26,7 @@ WORKDIR /app
 # (without it ADK's GCP telemetry setup crashes on boot — verified in Phase 1).
 # Keep versions aligned with pyproject.toml.
 RUN pip install \
-      "google-adk[a2a]==2.7.0" \
+      "google-adk[a2a,otel-gcp]==2.7.0" \
       "google-api-python-client>=2.198.0" \
       "google-auth-httplib2>=0.4.1" \
       "google-auth-oauthlib>=1.4.0" \
