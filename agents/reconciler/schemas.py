@@ -198,3 +198,95 @@ class ReportingResult(BaseModel):
     confidence: float = Field(
         ..., ge=0.0, le=1.0, description="self-assessed reporting confidence"
     )
+
+# ---------------------------------------------------------------------------
+# Phase 3.5 — Categorization / Intake / Reconciliation schemas
+# ---------------------------------------------------------------------------
+
+# The closed chart of accounts. The Categorization agent MUST assign codes from
+# this list only — a code outside it is a contract violation (anti-hallucination
+# grounding: never invent account codes).
+CHART_OF_ACCOUNTS: dict[str, str] = {
+    "5000": "Cloud Infrastructure (compute, storage, network)",
+    "5010": "AI & API Services (model tokens, SaaS APIs)",
+    "5100": "Software Subscriptions (licenses, seats)",
+    "5200": "Developer Tools & Hosting",
+    "6000": "Professional Services (consulting, legal, support)",
+    "6100": "Office Supplies & Equipment",
+    "6200": "Travel & Entertainment",
+    "6300": "Marketing & Advertising",
+    "7000": "Payroll & Contractor Compensation",
+    "9000": "Uncategorized (requires human review)",
+}
+
+AccountCode = Literal[
+    "5000", "5010", "5100", "5200", "6000", "6100", "6200", "6300", "7000", "9000",
+]
+
+
+class CategorizedLineItem(BaseModel):
+    """A single line item mapped to the chart of accounts."""
+
+    description: str | None = None
+    account_code: AccountCode | None = None
+    account_name: str | None = None
+    rationale: str | None = None  # one line: why this code
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+
+
+class CategorizationResult(BaseModel):
+    """Envelope the Categorization agent returns.
+
+    ``known_vendor_mappings`` echo the SharedMemory-grounded vendor→code hints
+    that were injected into the prompt (provenance for the audit trail).
+    ``unassigned_count`` counts items left null / 9000 — null is first-class:
+    the agent never guesses an account code it cannot justify.
+    """
+
+    items: list[CategorizedLineItem] = Field(default_factory=list)
+    unassigned_count: int = 0
+    known_vendor_mappings: list[str] = Field(default_factory=list)  # e.g. ["Acme Cloud Services LLC=5000"]
+    confidence: float = Field(..., ge=0.0, le=1.0)
+
+
+class InvoiceAttachment(BaseModel):
+    """One invoice document discovered by the Intake stage."""
+
+    source: Literal["gmail", "local_dir"] = "local_dir"
+    message_id: str | None = None  # gmail message id; local: filename
+    filename: str | None = None
+    mime_type: str | None = None
+    sha256: str | None = None  # idempotency / dedupe key material
+
+
+class IntakeResult(BaseModel):
+    """Envelope the Intake stage returns: invoices found this run."""
+
+    invoices: list[InvoiceAttachment] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)  # fetch failures never crash the run
+
+
+ReconciliationVerdict = Literal["matched", "discrepancy", "needs_review"]
+
+
+class ReconciliationResult(BaseModel):
+    """FINAL per-invoice verdict consolidating extraction + verification +
+    categorization.
+
+    Invariants (checked + reported, never assumed):
+      INV-1 sum(line_items.amount) == subtotal (±$0.02)
+      INV-2 subtotal + tax == total (±$0.02)
+      INV-3 every line item has an account code or is explicitly 9000/null
+      INV-4 verdict=matched ONLY if verification.matched and no discrepancies
+    """
+
+    invoice_number: str | None = None
+    vendor: str | None = None
+    verdict: ReconciliationVerdict | None = None
+    discrepancies: list[Discrepancy] = Field(default_factory=list)
+    invoice_total: float | None = None
+    bank_total: float | None = None
+    account_codes_assigned: bool = False
+    invariants_checked: list[str] = Field(default_factory=list)
+    invariants_passed: bool = False
+    confidence: float = Field(..., ge=0.0, le=1.0)

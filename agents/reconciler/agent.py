@@ -15,10 +15,15 @@ Safety rails (Phase 6):
   on send_digest_email → request_confirmation → framework pause).
 
 Specialists online:
-  Phase 2 — Extraction  (PDF -> structured invoice JSON, temp=0.0, output_schema)
-  Phase 3 — Verification (CoVe cross-check against bank-statement CSV)
-  Phase 6 — Reporting   (weekly digest email, FINAL HITL Tier-2 gate before send)
-  Phase 3.5+ — Categorization, Reconciliation, Intake (deferred)
+  Phase 2  — Extraction     (PDF -> structured invoice JSON, temp=0.0, output_schema)
+  Phase 3  — Verification   (CoVe cross-check against bank-statement CSV)
+  Phase 6  — Reporting      (weekly digest email, FINAL HITL Tier-2 gate before send)
+  Phase 3.5 — Intake        (Gmail OAuth via Secret Manager / local dir tools)
+  Phase 3.5 — Categorization(chart of accounts, substance-over-keyword)
+  Phase 3.5 — Reconciliation(final verdict, INV-1..INV-4 invariants)
+
+The batch execution spine lives in ``pipeline.py`` (triggered by Pub/Sub);
+the Supervisor exposes the same specialists as tools for interactive use.
 """
 
 from __future__ import annotations
@@ -27,9 +32,12 @@ from google.adk import Agent
 from google.genai import types
 
 from . import config
+from .categorization import categorization_agent
 from .extraction import extraction_agent
 from .instruction_contract import INSTRUCTION_CONTRACT
+from .intake import intake_agent
 from .middleware import with_safety_rails
+from .reconciliation import reconciliation_agent
 from .reporting import reporting_agent
 from .verification import verification_agent
 
@@ -41,9 +49,14 @@ from .verification import verification_agent
 # ---------------------------------------------------------------------------
 _extraction_wrapped = with_safety_rails(extraction_agent)
 _verification_wrapped = with_safety_rails(verification_agent)
+_categorization_wrapped = with_safety_rails(categorization_agent)
+_reconciliation_wrapped = with_safety_rails(reconciliation_agent)
 # reporting_agent keeps its own before_tool_callback (HITL Tier 2) and also
 # gets PII redaction + HITL Tier-1 overlaid by with_safety_rails.
 _reporting_wrapped = with_safety_rails(reporting_agent)
+# intake_agent is tool-driven (no output_schema): rails still apply so its
+# model turns are PII-redacted and low-confidence flags fire.
+_intake_wrapped = with_safety_rails(intake_agent)
 
 _SUPERVISOR_INSTRUCTION = (
     INSTRUCTION_CONTRACT
@@ -51,15 +64,21 @@ _SUPERVISOR_INSTRUCTION = (
     + "You are the Reconciler Supervisor orchestrating a reconciliation run.\n"
     "A run has just been triggered. You have access to single-turn specialist\n"
     "tools (auto-exposed from your sub_agents):\n"
-    "  - extraction  : extract a vendor invoice PDF into structured invoice JSON.\n"
-    "  - verification: cross-check extracted invoice against bank-statement CSV\n"
-    "                  using Chain-of-Verification (CoVe) — flags discrepancies,\n"
-    "                  never silently trusts the extraction draft.\n"
-    "  - reporting   : compose a weekly digest escalating only flagged items;\n"
-    "                  a FINAL HITL gate pauses before any email is sent.\n"
+    "  - intake       : discover invoice PDFs (Gmail via Secret-Manager-isolated\n"
+    "                   OAuth, or a local directory) and fetch their bytes.\n"
+    "  - extraction   : extract a vendor invoice PDF into structured invoice JSON.\n"
+    "  - verification : cross-check extracted invoice against bank-statement CSV\n"
+    "                   using Chain-of-Verification (CoVe) — flags discrepancies,\n"
+    "                   never silently trusts the extraction draft.\n"
+    "  - categorization: assign every line item a chart-of-accounts code;\n"
+    "                   never invents a code it cannot justify.\n"
+    "  - reconciliation: final per-invoice verdict — recomputes the monetary\n"
+    "                   invariants itself instead of trusting upstream stages.\n"
+    "  - reporting    : compose a weekly digest escalating only flagged items;\n"
+    "                   a FINAL HITL gate pauses before any email is sent.\n"
     "Per pipeline stage you delegate to the right specialist and forward its\n"
-    "output to the next stage. Do NOT do extraction, verification, or reporting\n"
-    "yourself — delegate them.\n"
+    "output to the next stage. Do NOT do intake, extraction, verification,\n"
+    "categorization, reconciliation, or reporting yourself — delegate them.\n"
     "\n"
     "When responding to a run trigger where no invoices have been ingested yet,\n"
     "respond with a single JSON object and nothing else, of shape:\n"
@@ -70,10 +89,14 @@ _SUPERVISOR_INSTRUCTION = (
 )
 
 # Specialists are single-turn sub-agents (auto-wrapped as single-turn tools).
-# Grows per phase; kept explicit so the wiring point is grep-able.
+# All six stages of the pipeline are wired; kept explicit so the wiring point
+# is grep-able.
 _SUB_AGENTS = [  # noqa: N806
+    _intake_wrapped,
     _extraction_wrapped,
     _verification_wrapped,
+    _categorization_wrapped,
+    _reconciliation_wrapped,
     _reporting_wrapped,
 ]
 
