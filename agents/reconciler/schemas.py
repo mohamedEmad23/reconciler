@@ -315,7 +315,7 @@ class ResolutionDecision(BaseModel):
 
     discrepancy_type: DiscrepancyType | None = None
     lane: ResolutionLane | None = None
-    confidence: float | None = None
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     evidence_refs: list[str] = Field(default_factory=list)  # memory keys / source hashes consulted
     rationale: str | None = None  # REQUIRED — the "why" (provenance)
 

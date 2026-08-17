@@ -109,8 +109,11 @@ CONFIDENCE_THRESHOLD = 0.7  # below this → flag for human review (no pause)
 # A judge can read all three constants and see exactly where the agent draws
 # its autonomy lines:
 #   confidence <  0.70              → escalate (Tier-1 HITL flag; already handled)
-#   0.70 <= confidence < 0.90       → dispute: draft corrective action, human approves
+#   0.70 <= confidence < 0.90       → dispute, OR conditional resolve when
+#                                     evidence exists AND action risk is low
+#                                     (resolve then re-verify, else escalate)
 #   confidence >= 0.90 & low risk   → resolve autonomously, then RE-VERIFY
+#   confidence >= 0.90 & high risk  → dispute (draft + human approve)
 DISPUTE_THRESHOLD = 0.70  # at/above this (and < RESOLVE) = draft + human approve
 RESOLVE_THRESHOLD = 0.90  # at/above this + low-risk action = auto-resolve + re-verify
 
@@ -135,6 +138,10 @@ def _extract_confidence(text: str | None) -> float | None:
     except (json.JSONDecodeError, TypeError):
         return None
     c = obj.get("confidence")
+    if c is None and isinstance(obj.get("decision"), dict):
+        # ResolutionAgent payloads nest the confidence inside
+        # decision.confidence — the Tier-1 flag must not be blind to it.
+        c = obj["decision"].get("confidence")
     if isinstance(c, bool):  # bool is subclass of int — exclude explicitly
         return None
     if isinstance(c, (int, float)):

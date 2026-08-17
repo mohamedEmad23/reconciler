@@ -203,8 +203,46 @@ def unit_close_resolution() -> None:
         out4 = await p3._close_resolution(payload4)  # type: ignore[arg-type]
         assert out4["outcome"] == "escalated", out4
 
+        # HARD CLAMP (Gate 9 F1): duplicate_payment + lane=resolve is
+        # forced to dispute — money moves only with a human approval.
+        p5 = _P({"matched": True, "discrepancies": []})
+        payload5 = {
+            "decision": {"lane": "resolve", "discrepancy_type": "duplicate_payment", "confidence": 0.99},
+            "corrected_invoice": {"vendor": "Acme", "total": 2400.0},
+        }
+        out5 = await p5._close_resolution(payload5)  # type: ignore[arg-type]
+        assert out5["outcome"] == "disputed", out5
+        assert "clamp" in (out5["decision"].get("rationale") or "")
+
+        # HARD CLAMP (Gate 9 F1): confidence below DISPUTE_THRESHOLD is
+        # forced to escalate regardless of the lane the model chose.
+        payload6 = {
+            "decision": {"lane": "resolve", "discrepancy_type": "date_mismatch", "confidence": 0.3},
+            "corrected_invoice": {"vendor": "Acme", "total": 467.50},
+        }
+        out6 = await p5._close_resolution(payload6)  # type: ignore[arg-type]
+        assert out6["outcome"] == "escalated", out6
+        assert "clamp" in (out6["decision"].get("rationale") or "")
+
+        # Provenance (Gate 9 F5): every closed resolution carries the audit
+        # entry, and evidence_refs citing non-existent packet keys are
+        # surfaced, not trusted.
+        payload7 = {
+            "decision": {"lane": "resolve", "discrepancy_type": "date_mismatch",
+                         "confidence": 0.95,
+                         "evidence_refs": ["date_delta_days", "made_up_ref"]},
+            "corrected_invoice": {"total": 467.50},
+        }
+        out7 = await p5._close_resolution(payload7, evidence={"date_delta_days": 2})  # type: ignore[arg-type]
+        assert out7["outcome"] == "resolved", out7
+        prov = out7.get("provenance") or {}
+        assert prov.get("lane") == "resolve" and prov.get("recheck_matched") is True
+        assert prov.get("rule_fired") and prov.get("timestamp")
+        assert out7.get("evidence_refs_invalid") == ["made_up_ref"]
+        assert out7.get("invoice_before_correction") is not None
+
     asyncio.run(_go())
-    print("[unit] _close_resolution PASS — resolved only after re-verify; fail->escalated; dispute drafts stay drafts")
+    print("[unit] _close_resolution PASS — strict re-verify closure + hard lane clamps + provenance + evidence-ref validation")
 
 
 def unit_evidence_packet() -> None:
@@ -310,8 +348,21 @@ def scenario_b_duplicate_payment() -> None:
     assert lane == "dispute", f"scenario B: duplicate_payment must be dispute, got {lane}: {json.dumps(out)}"
     assert draft.get("amount_at_risk", 0) > 0, f"dispute draft must carry amount_at_risk: {draft}"
     assert draft.get("recipient") and draft.get("subject") and draft.get("body"), draft
-    # the draft is inert by construction: ResolutionAction has no send field
-    assert "send" not in json.dumps(out).lower() or "never" in json.dumps(out).lower() or True
+    # the draft is inert by construction: ResolutionAction has no send field.
+    # Structural check — no send-capability KEY anywhere in the payload tree
+    # (prose may legitimately mention sending; a capability cannot).
+    def _walk_keys(o):
+        if isinstance(o, dict):
+            for k, v in o.items():
+                yield k
+                yield from _walk_keys(v)
+        elif isinstance(o, list):
+            for it in o:
+                yield from _walk_keys(it)
+
+    keys = set(_walk_keys(out))
+    assert not any("send" in k.lower() or "sent" in k.lower() for k in keys), keys
+    assert set(draft.keys()) <= {"recipient", "subject", "body", "amount_at_risk"}, draft
     print(f"[live B] duplicate_payment PASS — lane=dispute, amount_at_risk=${draft.get('amount_at_risk'):,.2f}, "
           f"draft inert (no send capability in schema)")
 

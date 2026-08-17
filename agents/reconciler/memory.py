@@ -106,6 +106,39 @@ def _now_utc() -> datetime:
 # ---------------------------------------------------------------------------
 
 
+@firestore.async_transactional
+async def _checkpoint_tx(
+    transaction: Any,
+    ref: Any,
+    stage: str,
+    data: dict[str, Any],
+) -> dict[str, Any]:
+    """Read-merge-write checkpoint INSIDE a Firestore transaction.
+
+    NOTE: module-level on purpose — ``async_transactional`` passes the
+    transaction as the decorated function's FIRST positional argument, so
+    the function signature must lead with it (an instance method would
+    have ``self`` occupy that slot and shift every argument).
+    """
+    snap = await ref.get(transaction=transaction)
+    if not snap.exists:
+        raise KeyError(
+            f"invoice {ref.id} not started — call start_invoice first"
+        )
+    existing = snap.to_dict() or {}
+    stages_done = list(existing.get("stages_done", []))
+    if stage not in stages_done:
+        stages_done.append(stage)
+    merged_data = {**existing.get("stages_data", {}), stage: data}
+    update = {
+        "stages_done": stages_done,
+        "stages_data": merged_data,
+        "updated_at": _SERVER_NOW,
+    }
+    transaction.update(ref, update)
+    return {**existing, **update}
+
+
 class RunsStore:
     """Immutable run/invoice audit trail with per-stage checkpointing.
 
@@ -308,23 +341,13 @@ class RunsStore:
             )
         doc_id = self.invoice_doc_id(run_id, invoice_id)
         ref = self.client.collection(RUN_INVOICES_COLLECTION).document(doc_id)
-        snap = await ref.get()
-        if not snap.exists:
-            raise KeyError(
-                f"invoice {doc_id} not started — call start_invoice first"
-            )
-        existing = snap.to_dict() or {}
-        stages_done = list(existing.get("stages_done", []))
-        if stage not in stages_done:
-            stages_done.append(stage)
-        merged_data = {**existing.get("stages_data", {}), stage: data}
-        update = {
-            "stages_done": stages_done,
-            "stages_data": merged_data,
-            "updated_at": _SERVER_NOW,
-        }
-        await ref.update(update)
-        return {**existing, **update}
+        # Transactional (CAS): two workers resuming the same invoice after
+        # an expired lease can no longer interleave read-merge-write —
+        # Firestore retries the whole transaction on contention, so the
+        # loser re-reads fresh state and merges on top of the winner.
+        return await _checkpoint_tx(
+            self.client.transaction(), ref, stage, data
+        )
 
     async def mark_invoice_completed(
         self, *, run_id: str, invoice_id: str

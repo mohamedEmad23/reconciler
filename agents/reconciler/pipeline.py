@@ -45,7 +45,7 @@ from . import config
 from .categorization import categorization_agent
 from .extraction import extraction_agent
 from .memory import RunsStore, SharedMemory
-from .middleware import CONFIDENCE_THRESHOLD, with_safety_rails
+from .middleware import CONFIDENCE_THRESHOLD, DISPUTE_THRESHOLD, with_safety_rails
 from .reconciliation import reconciliation_agent
 from .reporting import reporting_agent
 from .resolution import resolution_agent
@@ -251,10 +251,10 @@ class Pipeline:
         for line in bank_text.splitlines()[1:]:
             if not line.strip():
                 continue
-            try:
-                date, desc, amount, *_ = next(csv.reader([line]))
-            except (StopIteration, csv.Error):
-                continue
+            row = next(csv.reader([line]), [])
+            if len(row) < 3:
+                continue  # malformed bank line — never fail the run on it
+            date, desc, amount, *_ = row
             rows.append(
                 {"date": date.strip(), "description": desc.strip(), "amount": amount.strip()}
             )
@@ -376,28 +376,69 @@ class Pipeline:
             hint="resolution",
         )
 
-    async def _close_resolution(self, payload: dict[str, Any]) -> dict[str, Any]:
+    async def _close_resolution(
+        self,
+        payload: dict[str, Any],
+        *,
+        evidence: dict[str, Any] | None = None,
+        extraction: dict[str, Any] | None = None,
+        verification: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Execute the decided lane and CLOSE THE LOOP by re-verification.
 
         Anti-gaming guard (design doc §1.6/§9): ``resolved`` is only ever
-        set when an INDEPENDENT re-verification pass confirms the target
-        discrepancy is gone. A failed re-check demotes to ``escalated`` —
-        the resolver can never self-certify.
+        set when an INDEPENDENT re-verification pass comes back fully
+        clean (matched AND no discrepancies). A failed re-check demotes
+        to ``escalated`` — the resolver can never self-certify.
         """
         decision = payload.get("decision") or {}
         lane = decision.get("lane")
         target_type = decision.get("discrepancy_type")
+        conf = decision.get("confidence")
+
+        # HARD lane clamps — never trust a prompt to keep a money/safety
+        # invariant (same doctrine as the digest email clamp in run()).
+        if target_type == "duplicate_payment" and lane == "resolve":
+            lane = "dispute"
+            decision["lane"] = "dispute"
+            decision["rationale"] = (
+                f"{decision.get('rationale') or ''} "
+                "[pipeline clamp: duplicate_payment is ALWAYS high-risk "
+                "-> dispute]"
+            ).strip()
+        if lane != "escalate" and conf is not None and conf < DISPUTE_THRESHOLD:
+            lane = "escalate"
+            decision["lane"] = "escalate"
+            decision["rationale"] = (
+                f"{decision.get('rationale') or ''} "
+                f"[pipeline clamp: confidence {conf} < DISPUTE_THRESHOLD "
+                f"{DISPUTE_THRESHOLD} -> escalate]"
+            ).strip()
 
         if lane == "resolve" and payload.get("corrected_invoice"):
-            corrected = payload["corrected_invoice"]
-            recheck = await self._stage_verification(corrected)
+            original = (extraction or {}).get("invoice") or {}
+            corrected_raw = payload["corrected_invoice"]
+            # Field-preservation merge: a correction may only change fields
+            # it explicitly sets; it can never null-out or drop fields the
+            # original extraction had (every Invoice leaf is Optional, so
+            # trusting the corrected invoice wholesale would let a gutted
+            # invoice through). Keep the pre-correction copy for the audit
+            # trail.
+            merged = {
+                **original,
+                **{k: v for k, v in corrected_raw.items() if v is not None},
+            }
+            payload["invoice_before_correction"] = original
+            payload["corrected_invoice"] = merged
+            recheck = await self._stage_verification(merged)
             payload["recheck"] = recheck
             payload["recheck_matched"] = bool(recheck.get("matched"))
             discrepancies = recheck.get("discrepancies") or []
-            gone = all(d.get("type") != target_type for d in discrepancies)
+            # STRICT closure: resolved only on a fully clean recheck —
+            # matched AND zero remaining discrepancies of ANY type.
             payload["outcome"] = (
                 "resolved"
-                if (recheck.get("matched") or gone)
+                if (recheck.get("matched") and not discrepancies)
                 else "escalated"
             )
         elif lane == "dispute":
@@ -407,7 +448,66 @@ class Pipeline:
             payload["outcome"] = "disputed"
         else:
             payload["outcome"] = "escalated"
+
+        # Provenance trail (spec §3): one entry per resolution, chaining
+        # extraction evidence -> CoVe trace -> decision -> recheck. The
+        # agent's evidence_refs are validated against the packet — citing
+        # evidence that never existed is surfaced, not trusted.
+        packet = evidence or {}
+        memory_keys_consulted = [
+            f"vendor:{k}"
+            for k, v in [
+                ("alias", packet.get("vendor_alias_fact")),
+                ("prior_invoice", packet.get("prior_invoice_fact")),
+            ]
+            if v is not None
+        ]
+        packet_keys = set(packet.keys())
+        refs = decision.get("evidence_refs") or []
+        unknown_refs = [r for r in refs if r not in packet_keys]
+        if unknown_refs:
+            payload["evidence_refs_invalid"] = unknown_refs
+        best = packet.get("best_vendor_row") or {}
+        rule_fired = (
+            f"fuzzy_match(vendor, bank_row) @ {best.get('score')}"
+            if best.get("score") is not None
+            else "no_vendor_row_evidence"
+        )
+        payload["provenance"] = {
+            "discrepancy_type": target_type,
+            "lane": lane,
+            "extraction_hash": (extraction or {}).get("source_hash"),
+            "verification_questions": (verification or {}).get(
+                "verification_questions"
+            ),
+            "verification_answers": (verification or {}).get(
+                "verification_answers"
+            ),
+            "memory_keys_consulted": memory_keys_consulted,
+            "rule_fired": rule_fired,
+            "resolution_rationale": decision.get("rationale"),
+            "recheck_matched": payload.get("recheck_matched"),
+            "human_decision": None,
+            "trace_id": self._current_trace_id(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
         return payload
+
+    @staticmethod
+    def _current_trace_id() -> str | None:
+        """Link the provenance entry to the Cloud Trace waterfall (spec §3).
+
+        Returns None when no span is active (local runs, tests) instead of
+        the all-zero placeholder trace id.
+        """
+        try:  # pragma: no cover - optional dependency in local runs
+            from opentelemetry import trace as otel_trace
+
+            ctx = otel_trace.get_current_span().get_span_context()
+            trace_id = format(ctx.trace_id, "032x")
+            return None if trace_id == "0" * 32 else trace_id
+        except Exception:
+            return None
 
     async def _stage_categorization(
         self, invoice: dict[str, Any], vendor_hints: list[str]
@@ -635,7 +735,12 @@ class Pipeline:
                         payload = await self._stage_resolution(
                             data["extraction"], verification_payload, evidence
                         )
-                        payload = await self._close_resolution(payload)
+                        payload = await self._close_resolution(
+                            payload,
+                            evidence=evidence,
+                            extraction=data["extraction"],
+                            verification=verification_payload,
+                        )
                     if (
                         payload.get("outcome") == "resolved"
                         and payload.get("corrected_invoice")
@@ -643,8 +748,9 @@ class Pipeline:
                         # Downstream stages (categorization, reconciliation)
                         # consume the CORRECTED invoice: re-checkpoint the
                         # extraction stage with the fix applied. checkpoint()
-                        # merges stage data; the duplicate 'extraction' entry
-                        # in stages_done is harmless (forward-only resume).
+                        # merges stage data and DEDUPES stages_done, so the
+                        # already-present 'extraction' entry is a no-op
+                        # (forward-only resume is unaffected).
                         state = await self.store.checkpoint(
                             run_id=run_id,
                             invoice_id=invoice_id,
@@ -782,13 +888,21 @@ class Pipeline:
             # flags low confidence in its throwaway session; the pipeline
             # re-derives the same signal from the persisted stage payloads
             # so a low-confidence invoice escalates even when matched.
-            low_conf = [
-                {"stage": st, "confidence": p["confidence"]}
-                for st, p in (s.get("stages_data") or {}).items()
-                if isinstance(p, dict)
-                and isinstance(p.get("confidence"), (int, float))
-                and p["confidence"] < CONFIDENCE_THRESHOLD
-            ]
+            low_conf = []
+            for st, p in (s.get("stages_data") or {}).items():
+                if not isinstance(p, dict):
+                    continue
+                # Resolution payloads nest the confidence inside
+                # decision.confidence — check both levels (same fallback
+                # as middleware._extract_confidence).
+                conf = p.get("confidence")
+                if conf is None and isinstance(p.get("decision"), dict):
+                    conf = p["decision"].get("confidence")
+                if (
+                    isinstance(conf, (int, float))
+                    and conf < CONFIDENCE_THRESHOLD
+                ):
+                    low_conf.append({"stage": st, "confidence": conf})
             if low_conf:
                 rec = dict(rec)
                 rec["low_confidence_flags"] = low_conf
