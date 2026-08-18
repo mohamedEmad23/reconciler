@@ -134,8 +134,12 @@ def build_fixture_evidence() -> dict:
 
         class _P(Pipeline):
             def __init__(self):
+                from reconciler.resilience import CircuitBreaker
+
                 self.memory = _NullMemory()
                 self.bank_csv = FIXTURES / "bank_statement.csv"
+                # P10 wiring: _read_bank runs behind a per-dependency breaker.
+                self._bank_breaker = CircuitBreaker(dependency="bank-statement")
 
         p = _P()
         invoice = {
@@ -226,20 +230,39 @@ def unit_close_resolution() -> None:
 
         # Provenance (Gate 9 F5): every closed resolution carries the audit
         # entry, and evidence_refs citing non-existent packet keys are
-        # surfaced, not trusted.
+        # surfaced, not trusted. rule_fired must reflect the ACTUAL
+        # evidence-packet score (key 'fuzzy'), not a truthy placeholder.
         payload7 = {
             "decision": {"lane": "resolve", "discrepancy_type": "date_mismatch",
                          "confidence": 0.95,
                          "evidence_refs": ["date_delta_days", "made_up_ref"]},
             "corrected_invoice": {"total": 467.50},
         }
-        out7 = await p5._close_resolution(payload7, evidence={"date_delta_days": 2})  # type: ignore[arg-type]
+        out7 = await p5._close_resolution(
+            payload7,
+            evidence={
+                "date_delta_days": 2,
+                "best_vendor_row": {"description": "CARD ACME CLOUD", "fuzzy": 0.95},
+            },  # type: ignore[arg-type]
+        )
         assert out7["outcome"] == "resolved", out7
         prov = out7.get("provenance") or {}
         assert prov.get("lane") == "resolve" and prov.get("recheck_matched") is True
-        assert prov.get("rule_fired") and prov.get("timestamp")
+        assert prov.get("rule_fired") == "fuzzy_match(vendor, bank_row) @ 0.95", prov
+        assert prov.get("timestamp")
         assert out7.get("evidence_refs_invalid") == ["made_up_ref"]
         assert out7.get("invoice_before_correction") is not None
+
+        # HARD CLAMP (re-review follow-up): an OMITTED confidence (None)
+        # is treated as below-threshold — never a clamp bypass.
+        payload8 = {
+            "decision": {"lane": "resolve", "discrepancy_type": "date_mismatch",
+                         "confidence": None},
+            "corrected_invoice": {"total": 467.50},
+        }
+        out8 = await p5._close_resolution(payload8)  # type: ignore[arg-type]
+        assert out8["outcome"] == "escalated", out8
+        assert "missing" in (out8["decision"].get("rationale") or "")
 
     asyncio.run(_go())
     print("[unit] _close_resolution PASS — strict re-verify closure + hard lane clamps + provenance + evidence-ref validation")

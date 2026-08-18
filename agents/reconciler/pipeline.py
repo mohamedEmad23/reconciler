@@ -436,13 +436,19 @@ class Pipeline:
                 "[pipeline clamp: duplicate_payment is ALWAYS high-risk "
                 "-> dispute]"
             ).strip()
-        if lane != "escalate" and conf is not None and conf < DISPUTE_THRESHOLD:
+        # An omitted confidence is treated as below-threshold — a prompt
+        # can never buy autonomy by leaving the confidence field out.
+        if lane != "escalate" and (conf is None or conf < DISPUTE_THRESHOLD):
             lane = "escalate"
             decision["lane"] = "escalate"
+            reason = (
+                "missing"
+                if conf is None
+                else f"{conf} < DISPUTE_THRESHOLD {DISPUTE_THRESHOLD}"
+            )
             decision["rationale"] = (
                 f"{decision.get('rationale') or ''} "
-                f"[pipeline clamp: confidence {conf} < DISPUTE_THRESHOLD "
-                f"{DISPUTE_THRESHOLD} -> escalate]"
+                f"[pipeline clamp: confidence {reason} -> escalate]"
             ).strip()
 
         if lane == "resolve" and payload.get("corrected_invoice"):
@@ -484,14 +490,22 @@ class Pipeline:
         # agent's evidence_refs are validated against the packet — citing
         # evidence that never existed is surfaced, not trusted.
         packet = evidence or {}
-        memory_keys_consulted = [
-            f"vendor:{k}"
-            for k, v in [
-                ("alias", packet.get("vendor_alias_fact")),
-                ("prior_invoice", packet.get("prior_invoice_fact")),
-            ]
-            if v is not None
-        ]
+        # Namespaced memory keys actually consulted during evidence
+        # gathering (vendor aliases vs prior invoices — never mislabeled).
+        inv_meta = (extraction or {}).get("invoice") or {}
+        memory_keys_consulted = []
+        if (
+            packet.get("vendor_alias_fact") is not None
+            and inv_meta.get("vendor")
+        ):
+            memory_keys_consulted.append(f"vendor:{inv_meta['vendor']}")
+        if (
+            packet.get("prior_invoice_fact") is not None
+            and inv_meta.get("invoice_number")
+        ):
+            memory_keys_consulted.append(
+                f"prior_invoice:{inv_meta['invoice_number']}"
+            )
         packet_keys = set(packet.keys())
         refs = decision.get("evidence_refs") or []
         unknown_refs = [r for r in refs if r not in packet_keys]
@@ -499,8 +513,8 @@ class Pipeline:
             payload["evidence_refs_invalid"] = unknown_refs
         best = packet.get("best_vendor_row") or {}
         rule_fired = (
-            f"fuzzy_match(vendor, bank_row) @ {best.get('score')}"
-            if best.get("score") is not None
+            f"fuzzy_match(vendor, bank_row) @ {best.get('fuzzy')}"
+            if best.get("fuzzy") is not None
             else "no_vendor_row_evidence"
         )
         payload["provenance"] = {
