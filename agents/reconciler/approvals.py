@@ -26,6 +26,7 @@ from typing import Any, Awaitable, Callable
 
 from google.cloud import firestore
 
+from . import learning
 from .memory import RUN_INVOICES_COLLECTION, RUNS_COLLECTION, get_firestore_client
 from .tools import email_tools
 
@@ -144,7 +145,21 @@ async def approve(
     )
 
     payload: dict[str, Any] = {"run_id": run_id, "invoice_id": invoice_id, "approver": approver}
-    return await _approve_tx(client.transaction(), ref, run_ref, payload, approver, send_result)
+    result = await _approve_tx(client.transaction(), ref, run_ref, payload, approver, send_result)
+
+    # Post-decision learning (non-fatal): the human just confirmed this
+    # dispute was correct, so persist positive facts for the next run.
+    if result.get("status") == "approved":
+        fields = await learning._read_invoice_fields(client, run_id, invoice_id)
+        result["learning"] = await learning.record_approval_facts(
+            client=client,
+            vendor=fields.get("vendor"),
+            invoice_number=fields.get("invoice_number"),
+            total=fields.get("total"),
+            discrepancy_types=fields.get("discrepancy_types"),
+            account_codes=fields.get("account_codes"),
+        )
+    return result
 
 
 @firestore.async_transactional
@@ -187,4 +202,16 @@ async def reject(
     client = client or get_firestore_client()
     ref = client.collection(RUN_INVOICES_COLLECTION).document(f"{run_id}_{invoice_id}")
     payload: dict[str, Any] = {"run_id": run_id, "invoice_id": invoice_id, "approver": approver}
-    return await _reject_tx(client.transaction(), ref, payload, approver, reason or "(no reason given)")
+    result = await _reject_tx(client.transaction(), ref, payload, approver, reason or "(no reason given)")
+
+    # Post-decision learning (non-fatal): the human rejected this dispute,
+    # so persist a negative fact so the agent does not repeat the attempt.
+    if result.get("status") == "rejected":
+        fields = await learning._read_invoice_fields(client, run_id, invoice_id)
+        result["learning"] = await learning.record_rejection_fact(
+            client=client,
+            vendor=fields.get("vendor"),
+            invoice_number=fields.get("invoice_number"),
+            reason=reason or "(no reason given)",
+        )
+    return result
