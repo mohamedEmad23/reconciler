@@ -42,8 +42,15 @@ RUN pip install \
       "opentelemetry-exporter-gcp-trace>=1.9,<2" \
       "opentelemetry-resourcedetector-gcp>=1.9.0a0,<2"
 
-# Copy ONLY the agent package. No .venv, no docs, no tests, no creds.
+# Copy ONLY the agent package + the invoice/bank fixtures the batch pipeline
+# reads (tests/fixtures = clean set, tests/fixtures_duplicate = the $2,400
+# duplicate-payment money moment). No .venv, no docs, no scripts, no creds.
 COPY agents/ /app/agents/
+COPY tests/fixtures/ /app/tests/fixtures/
+COPY tests/fixtures_duplicate/ /app/tests/fixtures_duplicate/
+
+# Pure-FastAPI production surface (P13): the reconciler package must import.
+ENV PYTHONPATH=/app/agents
 
 # Non-root runtime.
 RUN useradd -m -u 1000 myuser && chown -R myuser:myuser /app
@@ -53,18 +60,9 @@ EXPOSE 8080
 ENV PORT=8080 \
     HOST=0.0.0.0
 
-# ADK API server.
-#   --no_use_local_storage      -> in-memory session/artifact (stateless)
-#   --trigger_sources=pubsub   -> registers POST /trigger/pubsub (Cloud
-#                                 Scheduler -> Pub/Sub push subscription
-#                                 delivers run triggers here)
-#   --trace_to_cloud            -> exports OTel spans to Cloud Trace
-#   --otel_to_cloud             -> exports OTel metrics/logs to Cloud Monitoring
-CMD ["adk", "api_server", \
-     "--host=0.0.0.0", "--port=8080", \
-     "--no_use_local_storage", \
-     "--trigger_sources=pubsub", \
-     "--trace_to_cloud", \
-     "--otel_to_cloud", \
-     "--log_level=info", \
-     "/app/agents/reconciler"]
+# Reconciler server — exactly five routes, NO ADK chat surface:
+#   GET  /health, GET /, GET /approvals (HITL Tier-2 face),
+#   POST /trigger/pubsub (Pub/Sub push -> batch Pipeline, idempotent),
+#   POST /approvals/{run}/{invoice}/decision (approve & send | reject).
+# OTel exporters initialise inside the app lifespan (Cloud Trace intact).
+CMD ["python", "-m", "reconciler.server"]

@@ -18,9 +18,13 @@ wheels/
 .slim/
 .ignore
 
-# Local-only docs/tests/scripts (kept in repo, not shipped to prod image)
+# Local-only docs/scripts (kept in repo, not shipped to prod image).
+# NOTE: test CODE is excluded file-by-file — excluding the whole tests/ dir
+# would make the fixture subdirs un-re-includable (ignore semantics), and the
+# deployed batch pipeline READS tests/fixtures{,_duplicate}/ (P13).
 docs/
-tests/
+tests/*.py
+__pycache__/
 scripts/smoke.py
 findings.md
 

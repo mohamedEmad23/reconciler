@@ -3,6 +3,7 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 
 SCOPES = [
     'https://www.googleapis.com/auth/gmail.modify',
+    'https://www.googleapis.com/auth/gmail.send',   # P13: approve-and-send beat
     'https://www.googleapis.com/auth/drive',
 ]
 
