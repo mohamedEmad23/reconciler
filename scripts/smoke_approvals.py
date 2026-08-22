@@ -27,13 +27,18 @@ for var in ("GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_GENAI_USE_VERTEXAI", "GOOG
 from fastapi.testclient import TestClient  # noqa: E402
 
 from reconciler import approvals, server  # noqa: E402
-from reconciler.memory import RUN_INVOICES_COLLECTION, RUNS_COLLECTION, get_firestore_client  # noqa: E402
+from reconciler.memory import RUN_INVOICES_COLLECTION, RUNS_COLLECTION, SharedMemory, get_firestore_client  # noqa: E402
 
 RUN_A = "smokeapprovals_a"
 RUN_B = "smokeapprovals_b"
 INV_1 = "invoice_one"
 INV_2 = "invoice_two"
 AMOUNT = 123.45
+# Unique (non-prod) identifiers so the P14 learning writes never pollute the
+# real vendor:Acme Cloud Services LLC fact used by demo evidence.
+SMOKE_VENDOR = "Smoke Approvals Vendor LLC"
+SMOKE_INV_1 = "INV-SMOKE-1"
+SMOKE_INV_2 = "INV-SMOKE-2"
 
 _sent: list[tuple[str, str, str]] = []
 
@@ -43,7 +48,7 @@ def _stub_send(recipient: str, subject: str, body: str) -> dict:
     return {"sent": True, "message_id": "stub-msg-1", "error": None}
 
 
-async def _seed(run_id: str, invoice_id: str, amount: float) -> None:
+async def _seed(run_id: str, invoice_id: str, amount: float, invoice_number: str) -> None:
     client = get_firestore_client()
     await client.collection(RUNS_COLLECTION).document(run_id).set(
         {"run_id": run_id, "job_type": "smoke", "status": "in_progress", "invoice_count": 1,
@@ -56,8 +61,8 @@ async def _seed(run_id: str, invoice_id: str, amount: float) -> None:
             "status": "in_progress",
             "stages_done": ["extraction", "verification", "resolution"],
             "stages_data": {
-                "extraction": {"invoice": {"vendor": "Acme Cloud Services LLC",
-                                           "invoice_number": "INV-SMOKE-1", "total": amount}},
+                "extraction": {"invoice": {"vendor": SMOKE_VENDOR,
+                                           "invoice_number": invoice_number, "total": amount}},
                 "verification": {"matched": False, "discrepancies": [{"type": "duplicate_payment"}]},
                 "resolution": {
                     "decision": {"discrepancy_type": "duplicate_payment", "lane": "dispute",
@@ -88,15 +93,20 @@ async def _run_doc(run_id: str) -> dict:
 
 async def _cleanup() -> None:
     client = get_firestore_client()
+    memory = SharedMemory(client)
     for run_id, inv in ((RUN_A, INV_1), (RUN_B, INV_2)):
         await client.collection(RUN_INVOICES_COLLECTION).document(f"{run_id}_{inv}").delete()
         await client.collection(RUNS_COLLECTION).document(run_id).delete()
+    # P14 learning writes facts on approve/reject — remove them too.
+    await memory.delete_fact(namespace="vendor", key=SMOKE_VENDOR)
+    for n in (SMOKE_INV_1, SMOKE_INV_2):
+        await memory.delete_fact(namespace="prior_invoice", key=n)
 
 
 async def main() -> None:
     await _cleanup()
-    await _seed(RUN_A, INV_1, AMOUNT)
-    await _seed(RUN_B, INV_2, 50.0)
+    await _seed(RUN_A, INV_1, AMOUNT, SMOKE_INV_1)
+    await _seed(RUN_B, INV_2, 50.0, SMOKE_INV_2)
 
     real_send = approvals.email_tools.send_email
     approvals.email_tools.send_email = _stub_send
