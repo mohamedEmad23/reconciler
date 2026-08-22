@@ -96,3 +96,24 @@ contract turns into "don't guess," the anti-hallucination signal.
 - Reconciler: ~5 Gemini calls ≈ **$0.03–0.05** per invoice at Flash pricing,
   everything else in free tier. Two orders of magnitude, and the human only
   sees the *flagged* tail plus a 10-second digest approval.
+
+## 9. Eval harness numbers (reproducible via `uv run scripts/eval.py`)
+
+These are measured, not asserted — the harness drives the real agents over the
+labeled fixture set and writes `docs/eval-results.md`:
+
+| Metric | Result |
+|---|---|
+| Extraction field accuracy | **100%** (clean + duplicate fixtures) |
+| Hallucinated entities (decoy canary) | **0** — the `$1,000,000` decoy never extracted |
+| Injected discrepancy recall | **5/5** (amount, vendor, date, number, duplicate_payment) |
+| Verification false-positives | **0** (clean invoice → `matched`, 0 discrepancies) |
+| Resolution re-verify pass rate | **1/1** (auto-resolved correction survived independent recheck) |
+| Dollars at risk | **$2,400.00** (duplicate_payment → dispute lane, drafted not sent) |
+
+One honest miss worth recording: the first date-mismatch injection (invoice date
+8 days after the bank charge) was **matched, not flagged** — CoVe treats a short
+posting lag as normal, which is exactly what §1.3 of the closed-loop spec says it
+should. Strengthening the injection to a 49-day gap (unambiguously anomalous)
+restored 5/5. This is the anti-gaming doctrine in action: report the miss, don't
+fudge the harness to hide it.
