@@ -34,9 +34,17 @@ from typing import Any
 
 from fastapi import FastAPI, Form
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from google.cloud import firestore
 
 from . import approvals, config
-from .memory import RunsStore, SharedMemory, get_firestore_client
+from .memory import (
+    MEMORY_COLLECTION,
+    RUN_INVOICES_COLLECTION,
+    RUNS_COLLECTION,
+    RunsStore,
+    SharedMemory,
+    get_firestore_client,
+)
 from .pipeline import Pipeline
 from .provenance import entries_from_state, render_entry
 
@@ -61,6 +69,18 @@ button{border:0;border-radius:.4rem;padding:.45rem 1rem;font-weight:600;cursor:p
 input[name=reason]{width:16rem;padding:.35rem;border:1px solid #d1d5db;border-radius:.4rem}
 .tag{display:inline-block;background:#fef3c7;border:1px solid #fcd34d;border-radius:999px;
      padding:.1rem .6rem;font-size:.75rem;font-weight:600;margin-right:.35rem}
+.score{display:flex;gap:1rem;flex-wrap:wrap}
+.score .metric{background:#fff;border:1px solid #e5e7eb;border-radius:.6rem;padding:1rem 1.25rem;
+     min-width:9rem}
+.score .metric .num{font-size:1.7rem;font-weight:800;color:#047857}
+.score .metric .lbl{color:#6b7280;font-size:.8rem}
+table{border-collapse:collapse;width:100%;font-size:.85rem}
+th,td{text-align:left;padding:.4rem .6rem;border-bottom:1px solid #e5e7eb}
+th{color:#6b7280;font-weight:600}
+.status{font-weight:700}.status.completed{color:#047857}.status.failed{color:#b91c1c}
+.status.in_progress{color:#b45309}
+.fact{font-family:ui-monospace,monospace;font-size:.78rem;background:#f3f4f6;border-radius:.4rem;
+     padding:.4rem .6rem;margin:.3rem 0;overflow-x:auto}
 """
 
 
@@ -108,13 +128,65 @@ async def health() -> dict[str, str]:
 
 @app.get("/")
 async def index() -> HTMLResponse:
-    return HTMLResponse(
-        "<html><head><style>" + _PAGE_CSS + "</style></head><body>"
+    runs = await _read_recent_runs(limit=20)
+    board = await _scoreboard(runs)
+    disputes = await approvals.list_pending_disputes()
+    facts = await _read_memory_facts(limit=30)
+
+    runs_rows: list[str] = []
+    for r in runs:
+        status = str(r.get("status") or "in_progress")
+        summary = r.get("summary") or {}
+        recovered = float(r.get("dollars_recovered") or 0.0)
+        risk = float(summary.get("dollars_at_risk") or 0.0)
+        flagged = summary.get("flagged_count")
+        job = str(r.get("job_type") or "weekly_reconcile")
+        runs_rows.append(
+            f"<tr><td><code>{html.escape(str(r.get('run_id')))}</code></td>"
+            f"<td>{html.escape(job)}</td>"
+            f"<td><span class='status {html.escape(status)}'>{html.escape(status)}</span></td>"
+            f"<td>{r.get('completed_count') or 0}/{r.get('invoice_count') or 0}</td>"
+            f"<td>{'—' if flagged is None else html.escape(str(flagged))}</td>"
+            f"<td>${recovered:,.2f}</td>"
+            f"<td>${risk:,.2f}</td></tr>"
+        )
+    runs_table = (
+        "<table><tr><th>run</th><th>job</th><th>status</th><th>done</th>"
+        "<th>flagged</th><th>recovered</th><th>at risk</th></tr>"
+        + "".join(runs_rows)
+        + "</table>"
+    )
+
+    fact_rows: list[str] = []
+    for f in facts:
+        ns = str(f.get("namespace") or "?")
+        key = str(f.get("key") or "?")
+        value = json.dumps(f.get("value") or {}, sort_keys=True)
+        fact_rows.append(
+            f"<div class='fact'><b>{html.escape(ns)}:</b>{html.escape(key)} → {html.escape(value)}</div>"
+        )
+    facts_html = (
+        "".join(fact_rows) if fact_rows else "<p class='muted'>No learned facts yet.</p>"
+    )
+
+    html_body = (
         "<h1>Reconciler</h1>"
         "<p class='muted'>Autonomous invoice reconciliation worker — not a chatbot.</p>"
-        "<ul><li><a href='/approvals'>Pending approvals</a> (HITL Tier-2 surface)</li>"
-        "<li><code>POST /trigger/pubsub</code> — Pub/Sub push → batch pipeline</li>"
-        "<li><code>GET /health</code></li></ul></body></html>"
+        "<div class='score'>"
+        f"<div class='metric'><div class='num'>${board['recovered']:,.2f}</div><div class='lbl'>dollars recovered</div></div>"
+        f"<div class='metric'><div class='num'>${board['at_risk']:,.2f}</div><div class='lbl'>dollars at risk</div></div>"
+        f"<div class='metric'><div class='num'>{board['completed']}</div><div class='lbl'>invoices cleared</div></div>"
+        f"<div class='metric'><div class='num'>{board['runs']}</div><div class='lbl'>runs</div></div>"
+        "</div>"
+        "<h2>Pending approvals <span class='muted'>(HITL Tier-2)</span></h2>"
+        + _dispute_cards(disputes, next_page="/")
+        + "<h2>Recent runs</h2>"
+        + runs_table
+        + "<h2>Learned memory <span class='muted'>(Shared Epistemic Memory)</span></h2>"
+        + facts_html
+    )
+    return HTMLResponse(
+        "<html><head><style>" + _PAGE_CSS + "</style></head><body>" + html_body + "</body></html>"
     )
 
 
@@ -131,6 +203,118 @@ def _pipeline_for(directory: str | None) -> Pipeline:
         # duplicates set carries the two INV-2026-0421 debits).
         bank_csv=bank_csv if os.path.exists(bank_csv) else None,
     )
+
+
+# ---------------------------------------------------------------------------
+# Dashboard read-only views (P17) — no agent logic, no LLM calls. The home
+# page is a single judge-facing surface over the same data the pipeline
+# already persists, so "how does it work" and "what did it do" are one click.
+# ---------------------------------------------------------------------------
+
+
+async def _read_recent_runs(limit: int = 10) -> list[dict[str, Any]]:
+    client = get_firestore_client()
+    query = (
+        client.collection(RUNS_COLLECTION)
+        .order_by("started_at", direction=firestore.Query.DESCENDING)
+        .limit(limit)
+    )
+    runs: list[dict[str, Any]] = []
+    async for snap in query.stream():
+        d = snap.to_dict() or {}
+        d["run_id"] = d.get("run_id") or snap.id
+        runs.append(d)
+    return runs
+
+
+async def _read_run_invoices(run_id: str) -> list[dict[str, Any]]:
+    client = get_firestore_client()
+    query = client.collection(RUN_INVOICES_COLLECTION).where(
+        filter=firestore.FieldFilter("run_id", "==", run_id)
+    )
+    out: list[dict[str, Any]] = []
+    async for snap in query.stream():
+        d = snap.to_dict() or {}
+        d["_id"] = snap.id
+        out.append(d)
+    out.sort(key=lambda d: str(d.get("invoice_id") or ""))
+    return out
+
+
+async def _read_memory_facts(limit: int = 30) -> list[dict[str, Any]]:
+    client = get_firestore_client()
+    query = client.collection(MEMORY_COLLECTION).limit(limit)
+    facts: list[dict[str, Any]] = []
+    async for snap in query.stream():
+        d = snap.to_dict() or {}
+        d["_id"] = snap.id
+        facts.append(d)
+    facts.sort(key=lambda d: (str(d.get("namespace") or ""), str(d.get("key") or "")))
+    return facts
+
+
+async def _scoreboard(runs: list[dict[str, Any]]) -> dict[str, Any]:
+    recovered = sum(float(r.get("dollars_recovered") or 0.0) for r in runs)
+    at_risk = 0.0
+    completed = 0
+    failed = 0
+    for r in runs:
+        summary = r.get("summary") or {}
+        at_risk += float(summary.get("dollars_at_risk") or 0.0)
+        completed += int(r.get("completed_count") or 0)
+        failed += int(r.get("failed_count") or 0)
+    return {
+        "recovered": recovered,
+        "at_risk": at_risk,
+        "completed": completed,
+        "failed": failed,
+        "runs": len(runs),
+    }
+
+
+def _dispute_cards(disputes: list[dict[str, Any]], *, next_page: str = "/approvals") -> str:
+    if not disputes:
+        return "<p>No pending disputes — the agent found nothing that needs you.</p>"
+    cards: list[str] = []
+    for d in disputes:
+        draft = d.get("draft") or {}
+        amount = draft.get("amount_at_risk")
+        prov = ""
+        entries, errors = entries_from_state(
+            {"stages_data": {"resolution": {"provenance": d.get("provenance")}}}
+        )
+        for problem in errors:
+            prov += f"<p class='muted'>provenance parse problem: {html.escape(problem)}</p>"
+        for entry in entries:
+            prov += html.escape(render_entry(entry, invoice_id=d.get("invoice_id")))
+        types = "".join(
+            f"<span class='tag'>{html.escape(str(t))}</span>"
+            for t in (d.get("discrepancies") or []) or ["dispute"]
+        )
+        amt_html = (
+            f"<div class='amt'>${amount:,.2f} at risk</div>"
+            if isinstance(amount, (int, float))
+            else "<div></div>"
+        )
+        card = (
+            f"<div class='card'><h2>{html.escape(str(d.get('vendor') or d.get('invoice_id')))}"
+            f" <span class='muted'>{html.escape(str(d.get('invoice_number') or ''))}</span></h2>"
+            f"<div>{types}</div>"
+            f"<p>Dispute draft: <b>{html.escape(str(draft.get('subject') or ''))}</b>"
+            f" → <code>{html.escape(str(draft.get('recipient') or ''))}</code></p>"
+            f"{amt_html}"
+            f"<pre>{prov}</pre>"
+            f"<form method='post' action='/approvals/{d['run_id']}/{d['invoice_id']}/decision?next={next_page}'>"
+            f"<input type='hidden' name='action' value='approve'>"
+            f"<button class='approve' type='submit'>Approve &amp; send</button></form>"
+            f"<form method='post' action='/approvals/{d['run_id']}/{d['invoice_id']}/decision?next={next_page}'>"
+            f"<input type='hidden' name='action' value='reject'>"
+            f"<input name='reason' placeholder='reason (required to reject)'>"
+            f"<button class='reject' type='submit'>Reject</button></form>"
+            f"<p class='muted'>run {html.escape(str(d['run_id']))} · invoice {html.escape(str(d['invoice_id']))}</p></div>"
+        )
+        cards.append(card)
+    return "".join(cards)
 
 
 @app.post("/trigger/pubsub")
@@ -172,42 +356,7 @@ async def trigger_pubsub(envelope: dict[str, Any]) -> JSONResponse:
 @app.get("/approvals")
 async def approvals_page() -> HTMLResponse:
     disputes = await approvals.list_pending_disputes()
-    if not disputes:
-        body = "<p>No pending disputes — the agent found nothing that needs you.</p>"
-    else:
-        cards = []
-        for d in disputes:
-            draft = d.get("draft") or {}
-            amount = draft.get("amount_at_risk")
-            prov = ""
-            entries, errors = entries_from_state(
-                {"stages_data": {"resolution": {"provenance": d.get("provenance")}}}
-            )
-            for problem in errors:
-                prov += f"<p class='muted'>provenance parse problem: {html.escape(problem)}</p>"
-            for entry in entries:
-                prov += html.escape(render_entry(entry, invoice_id=d.get("invoice_id")))
-            types = "".join(f"<span class='tag'>{html.escape(str(t))}</span>" for t in (d.get("discrepancies") or []) or ["dispute"])
-            cards.append(
-                f"<div class='card'><h2>{html.escape(str(d.get('vendor') or d.get('invoice_id')))}"
-                f" <span class='muted'>{html.escape(str(d.get('invoice_number') or ''))}</span></h2>"
-                f"<div>{types}</div>"
-                f"<p>Dispute draft: <b>{html.escape(str(draft.get('subject') or ''))}</b>"
-                f" → <code>{html.escape(str(draft.get('recipient') or ''))}</code></p>"
-                f"<div class='amt'>${amount:,.2f} at risk</div>" if isinstance(amount, (int, float)) else "<div></div>"
-            )
-            cards[-1] += (
-                f"<pre>{prov}</pre>"
-                f"<form method='post' action='/approvals/{d['run_id']}/{d['invoice_id']}/decision?format=json'>"
-                f"<input type='hidden' name='action' value='approve'>"
-                f"<button class='approve' type='submit'>Approve &amp; send</button></form>"
-                f"<form method='post' action='/approvals/{d['run_id']}/{d['invoice_id']}/decision?format=json'>"
-                f"<input type='hidden' name='action' value='reject'>"
-                f"<input name='reason' placeholder='reason (required to reject)'>"
-                f"<button class='reject' type='submit'>Reject</button></form>"
-                f"<p class='muted'>run {html.escape(str(d['run_id']))} · invoice {html.escape(str(d['invoice_id']))}</p></div>"
-            )
-        body = "".join(cards)
+    body = _dispute_cards(disputes)
     return HTMLResponse(
         "<html><head><style>" + _PAGE_CSS + "</style></head><body>"
         "<h1>Pending approvals — Reconciler HITL Tier-2</h1>" + body + "</body></html>"
@@ -216,7 +365,12 @@ async def approvals_page() -> HTMLResponse:
 
 @app.post("/approvals/{run_id}/{invoice_id}/decision")
 async def decision(
-    run_id: str, invoice_id: str, action: str = Form(...), reason: str = Form(""), format: str = "html"
+    run_id: str,
+    invoice_id: str,
+    action: str = Form(...),
+    reason: str = Form(""),
+    format: str = "html",
+    next: str = "/approvals",
 ):
     if action == "approve":
         result = await approvals.approve(run_id=run_id, invoice_id=invoice_id)
@@ -230,7 +384,7 @@ async def decision(
     if format == "json":
         return JSONResponse(result, status_code=status)
     if status == 200:
-        return RedirectResponse("/approvals", status_code=303)
+        return RedirectResponse(next, status_code=303)
     return JSONResponse(result, status_code=status)
 
 
