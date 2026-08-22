@@ -69,11 +69,25 @@ async def _lifespan(app: FastAPI):
     try:
         from google.adk.telemetry.google_cloud import get_gcp_exporters
         from google.adk.telemetry.setup import maybe_set_otel_providers
+        from opentelemetry.sdk.resources import Resource
 
         hooks = get_gcp_exporters(
             enable_cloud_tracing=True, enable_cloud_metrics=True, enable_cloud_logging=False
         )
-        maybe_set_otel_providers(otel_hooks_to_setup=[hooks])
+        # Google's OTLP endpoint rejects spans/metrics with a 400 unless the
+        # resource carries ``service.name``. maybe_set_otel_providers falls back
+        # to the env-based OTELResourceDetector, which leaves it unset in the
+        # container → the "Failed to export ... 400" loop seen in P13. Pin it
+        # explicitly (K_REVISION = Cloud Run revision id).
+        otel_resource = Resource.create(
+            {
+                "service.name": "reconciler",
+                "service.version": os.environ.get("K_REVISION", "dev"),
+            }
+        )
+        maybe_set_otel_providers(
+            otel_resource=otel_resource, otel_hooks_to_setup=[hooks]
+        )
         logger.info(
             "otel exporters initialised (spans=%s metrics=%s)",
             bool(hooks.span_processors), bool(hooks.metric_readers),

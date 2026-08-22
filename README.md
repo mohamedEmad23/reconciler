@@ -3,9 +3,11 @@
 **Not a chatbot.** Reconciler is a background worker that wakes on a schedule,
 pulls messy PDF invoices, extracts them with Gemini multimodal, cross-checks
 them against a bank statement with a Chain-of-Verification, categorizes them
-against a chart of accounts, flags discrepancies, persists everything to
-Firestore, and composes a weekly digest — escalating only what a human
-actually needs to see, and only *sending* anything after a human approves it.
+against a chart of accounts, **resolves what it can and escalates only what it
+must**, persists everything to Firestore with a full provenance trail, and
+composes a weekly digest. High-risk corrections are *drafted* — never sent —
+until a human clicks **Approve** on the web surface, which is the only component
+that can commit an external side effect and tally **dollars recovered**.
 
 Built for the DevPost **"All Things Agentic"** hackathon (Taskmaster track) on
 a deliberately non-default stack:
@@ -14,7 +16,7 @@ a deliberately non-default stack:
 |---|---|
 | Agent framework | **Google ADK 2.7** (Python) — not LangChain |
 | Model | **Gemini 2.5 Flash** via **Vertex AI** (one config constant, temp=0.0) |
-| Runtime | **Cloud Run** (`adk api_server`, service-account-only invoker) |
+| Runtime | **Cloud Run** (pure FastAPI surface, service-account-only invoker) |
 | Trigger | **Cloud Scheduler** → **Pub/Sub** push (OIDC) → `/trigger/pubsub` |
 | State/memory | **Firestore** — `runs`, `run_invoices`, `memory` collections |
 | Secrets | **Secret Manager** (Gmail/Drive OAuth) — nothing in the image |
@@ -48,15 +50,38 @@ a deliberately non-default stack:
 - **Reliability spine** — atomic `create()` idempotency fences (at-least-once
   Pub/Sub redelivery can't double-process), forward-only stage checkpoints
   (crash → resume at the next stage, not from zero), fail-isolation per
-  invoice, dead-letter topic for poison messages.
+  invoice, dead-letter topic for poison messages, plus **adaptive retry with
+  exponential backoff + jitter, per-dependency circuit breakers, and a watchdog
+  timeout on every tool call** (`resilience.py`) — kill the bank source mid-run
+  and the run still completes.
+- **Closed-loop resolution** — every discrepancy routes through a resolve /
+  dispute / escalate decision engine (`resolution.py`) driven by *Python-computed
+  evidence* (fuzzy vendor match, day deltas, exact/digit-transposed amounts), not
+  just the model's say-so. A "resolve" only counts if an **independent
+  re-verification pass confirms the discrepancy is gone** — never self-certified.
+- **Real dollars** — a confirmed duplicate charge is drafted as a dispute with an
+  `amount_at_risk`; `dollars_recovered` increments **only on human approval** of
+  that dispute or a re-verified correction. The seeded demo finds **$2,400.00**.
+- **Decision provenance** — every resolved/disputed/escalated action carries a
+  chain of extraction hash, CoVe questions/answers, memory keys consulted, the
+  rule that fired (with its real score), the recheck verdict, and the human
+  decision — all rendered on the approval page and linked to the Cloud Trace
+  waterfall.
+- **Closed-loop learning** — human approvals write *confirmed* facts (vendor
+  aliases, account codes, prior invoices); rejections write *negative* facts.
+  Facts are hints that shorten resolution, never a bypass: re-verification still
+  runs every time.
 
 ## Topology
 
-Supervisor + 6 single-turn specialists, one file each under `agents/reconciler/`:
-`intake`, `extraction`, `verification`, `categorization`, `reconciliation`,
-`reporting`. The Supervisor delegates (its instruction forbids doing the work
-itself); the batch spine (`pipeline.py`) drives the same specialists for the
-scheduled run with checkpoints between every stage.
+Supervisor + 7 single-turn specialists, one file each under `agents/reconciler/`:
+`intake`, `extraction`, `verification`, `resolution`, `categorization`,
+`reconciliation`, `reporting`. The Supervisor delegates (its instruction forbids
+doing the work itself); the batch spine (`pipeline.py`) drives the same
+specialists for the scheduled run with checkpoints between every stage. A pure
+FastAPI surface (`server.py`) exposes `/trigger/pubsub` (batch pipeline) and the
+`/approvals` HITL web page; `resilience.py`, `learning.py`, `provenance.py` and
+`approvals.py` wrap the runtime.
 
 ## Quickstart (reproducible in <10 minutes)
 
@@ -132,13 +157,18 @@ Or manually:
 gcloud scheduler jobs run reconciler-weekly --location us-central1
 gcloud logging read 'resource.type=cloud_run_revision resource.labels.service_name=reconciler' --limit=10
 
-# full six-specialist batch spine (writes real Firestore state)
+# full seven-specialist batch spine (writes real Firestore state)
 GOOGLE_APPLICATION_CREDENTIALS=~/keys/reconciler-sa.json \
 GOOGLE_GENAI_USE_VERTEXAI=1 GOOGLE_CLOUD_PROJECT=$PROJECT GOOGLE_CLOUD_LOCATION=$REGION \
 uv run python scripts/run_pipeline.py demo_live
 
 # re-run the SAME id → skipped, 0 LLM calls (idempotency proof)
 uv run python scripts/run_pipeline.py demo_live
+
+# approve a pending dispute (the only component with send authority)
+curl -X POST -H "Authorization: Bearer $(gcloud auth print-identity-token)" \
+  "https://reconciler-<hash>.$REGION.run.app/approvals/demo_live/duplicate_invoice_sample/decision?format=json" \
+  -d "action=approve&reason=verified duplicate charge"
 
 # see the state
 uv run python scripts/show_firestore.py
@@ -156,16 +186,23 @@ agents/reconciler/
   config.py               # single source of truth (model constant, topic names…)
   instruction_contract.py # FCoT Pillar 1 (immutable rules) + Pillar 2 (RECAP→REASON→VERIFY)
   schemas.py              # Pydantic output schemas + chart of accounts + invariants
-  agent.py                # Supervisor + all six specialists wired
+  agent.py                # Supervisor + all seven specialists wired
   intake.py tools/intake_tools.py
-  extraction.py verification.py categorization.py reconciliation.py reporting.py
+  extraction.py verification.py resolution.py categorization.py reconciliation.py reporting.py
   middleware.py           # PII redaction + HITL Tier-1/Tier-2 (ADK callbacks)
   memory.py               # RunsStore (checkpoints, idempotency) + SharedMemory
   pipeline.py             # batch spine: intake→…→reporting with checkpoints
-scripts/                  # demo.sh, run_pipeline.py, show_firestore.py, smokes
-tests/fixtures/           # deterministic invoice PDF + bank CSV (with decoys)
+  resilience.py           # retry/backoff, circuit breaker, watchdog, DLQ publish
+  learning.py             # approve→positive facts, reject→negative facts
+  provenance.py           # audit-trail read path + judge-facing rendering
+  approvals.py            # transactional approve/reject + dollars_recovered
+  server.py               # pure FastAPI surface (/trigger/pubsub, /approvals)
+scripts/                  # demo.sh, eval.py, run_pipeline.py, show_firestore.py, smokes, seed/fault scripts
+tests/fixtures/           # deterministic invoice PDF + bank CSV (with decoys + $2,400 duplicate)
+tests/fixtures_duplicate/ # duplicate-payment money-moment fixture set
 architecture.excalidraw   # editable diagram source (PNG export alongside)
 findings.md               # what we learned, with numbers
+docs/eval-results.md      # reproducible eval artifact (generated by scripts/eval.py)
 ```
 
 ## Verification
@@ -181,6 +218,26 @@ Every phase shipped with a smoke that asserts the claim it makes
 | `smoke_categorization.py` | chart-of-accounts codes, substance-over-keyword |
 | `smoke_firestore.py` | atomic idempotency fence, crash-resume, deep-merge memory |
 | `smoke_pipeline.py` | full chain end-to-end + idempotent re-run |
+| `smoke_resolution.py` | decision table, re-verification closure, draft inertness, abstention |
+| `smoke_resilience.py` | retry/backoff, circuit breaker, watchdog, DLQ (free) |
+| `smoke_duplicate.py` | duplicate-payment → dispute → $2,400 draft, dollars anti-gaming |
+| `smoke_approvals.py` | approve→resolved+send+$ recovered; reject→escalated; 409 double-decide |
+| `smoke_learning.py` | approve→positive facts, reject→negative facts, deep-merge |
+| `smoke_provenance.py` | audit-trail read path + judge rendering (free) |
+
+## Eval (reproducible numbers)
+
+```bash
+GOOGLE_APPLICATION_CREDENTIALS=~/keys/reconciler-sa.json \
+GOOGLE_GENAI_USE_VERTEXAI=1 GOOGLE_CLOUD_PROJECT=$PROJECT GOOGLE_CLOUD_LOCATION=$REGION \
+uv run python scripts/eval.py
+```
+
+Runs the real agents over labeled fixtures and writes `docs/eval-results.md`:
+extraction field accuracy **100%**, hallucinated entities **0**, injected
+discrepancy recall **5/5** (amount / vendor / date / invoice-number /
+duplicate-payment), false-positives **0**, resolution re-verify pass rate
+**1/1**, dollars at risk **$2,400.00**. Full table in `findings.md` §9.
 
 ## Cost
 
