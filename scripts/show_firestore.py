@@ -25,6 +25,7 @@ from reconciler.memory import (  # noqa: E402
     MEMORY_COLLECTION,
     get_firestore_client,
 )
+from reconciler.provenance import entries_from_state, render_entry  # noqa: E402
 
 
 async def main() -> int:
@@ -59,6 +60,16 @@ async def main() -> int:
             if reco:
                 print(f"    verdict={reco.get('verdict')} total={reco.get('invoice_total')} "
                       f"invariants_passed={reco.get('invariants_passed')}")
+            # P12: render the audit trail ("why did Reconciler do this?")
+            entries, perr = entries_from_state(inv)
+            for entry in entries:
+                print("    provenance:")
+                for line in render_entry(
+                    entry, invoice_id=inv.get("invoice_id")
+                ).splitlines():
+                    print(f"      {line}")
+            for err in perr:
+                print(f"    provenance: (malformed: {err})")
         print()
 
     mems = await client.collection(MEMORY_COLLECTION).limit(10).get()

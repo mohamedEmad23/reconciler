@@ -156,6 +156,15 @@ async def main() -> None:
         assert digest.get("digest_composed") is True
         assert digest.get("email_sent") is False
         assert digest.get("email_blocked_by_hitl") is True
+        # [6b] P12: the digest carries the deterministic provenance block
+        # for the disputed invoice (the "why" the HITL surface will render).
+        prov = (digest.get("provenance") or {}).get("duplicate_invoice_sample")
+        assert prov and "duplicate_payment" in prov and "dispute" in prov, (
+            f"[6b] digest provenance missing/incomplete: {prov!r}"
+        )
+        assert "invoice_sample" not in (digest.get("provenance") or {}), (
+            "[6b] clean invoice must not carry a provenance block"
+        )
 
         print("smoke_duplicate PASS")
     finally:

@@ -48,6 +48,7 @@ from .extraction import extraction_agent
 from .resilience import CircuitBreaker, guard, publish_to_dlq
 from .memory import RunsStore, SharedMemory
 from .middleware import CONFIDENCE_THRESHOLD, DISPUTE_THRESHOLD, with_safety_rails
+from .provenance import attach_digest_provenance
 from .reconciliation import reconciliation_agent
 from .reporting import reporting_agent
 from .resolution import resolution_agent
@@ -1006,6 +1007,11 @@ class Pipeline:
         if isinstance(result.digest, dict):
             result.digest["email_sent"] = False
             result.digest["email_blocked_by_hitl"] = True
+        # Provenance read path (P12): attach the deterministic "why" blocks
+        # for every invoice that recorded provenance. Compose-path only — a
+        # reused digest already carries its blocks (idempotent redelivery).
+        if isinstance(result.digest, dict) and not result.skipped:
+            attach_digest_provenance(result.digest, completed)
 
         status = "completed" if not failed else "completed_with_errors"
         await self.store.end_run(
