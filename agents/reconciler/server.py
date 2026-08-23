@@ -174,34 +174,41 @@ _GCP_SERVICES = [
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
-    try:
-        from google.adk.telemetry.google_cloud import get_gcp_exporters
-        from google.adk.telemetry.setup import maybe_set_otel_providers
-        from opentelemetry.sdk.resources import Resource
+    # Observability: Cloud Run auto-instruments HTTP requests into Cloud Trace,
+    # and the pipeline emits structured logs + a Firestore audit trail. The ADK
+    # OTLP cloud exporters are OPT-IN (RECONCILER_OTEL=1) because Google's OTLP
+    # endpoint rejects the ADK-built resource with a 400 on every flush (the
+    # "Failed to export metrics/span batch code: 400" loop), and that tight
+    # error loop starved the 512Mi instance — stalling Gemini calls and tripping
+    # the vertex-ai circuit breaker in live testing. Model-level spans are
+    # therefore off by default; HTTP traces + logs + audit trail carry the
+    # observability story.
+    if os.environ.get("RECONCILER_OTEL") == "1":
+        try:
+            from google.adk.telemetry.google_cloud import get_gcp_exporters
+            from google.adk.telemetry.setup import maybe_set_otel_providers
+            from opentelemetry.sdk.resources import Resource
 
-        hooks = get_gcp_exporters(
-            enable_cloud_tracing=True, enable_cloud_metrics=True, enable_cloud_logging=False
-        )
-        # Google's OTLP endpoint rejects spans/metrics with a 400 unless the
-        # resource carries ``service.name``. maybe_set_otel_providers falls back
-        # to the env-based OTELResourceDetector, which leaves it unset in the
-        # container → the "Failed to export ... 400" loop seen in P13. Pin it
-        # explicitly (K_REVISION = Cloud Run revision id).
-        otel_resource = Resource.create(
-            {
-                "service.name": "reconciler",
-                "service.version": os.environ.get("K_REVISION", "dev"),
-            }
-        )
-        maybe_set_otel_providers(
-            otel_resource=otel_resource, otel_hooks_to_setup=[hooks]
-        )
-        logger.info(
-            "otel exporters initialised (spans=%s metrics=%s)",
-            bool(hooks.span_processors), bool(hooks.metric_readers),
-        )
-    except Exception as exc:  # noqa: BLE001 — telemetry must never block serving
-        logger.warning("otel init skipped: %s", exc)
+            hooks = get_gcp_exporters(
+                enable_cloud_tracing=True, enable_cloud_metrics=True, enable_cloud_logging=False
+            )
+            otel_resource = Resource.create(
+                {
+                    "service.name": "reconciler",
+                    "service.version": os.environ.get("K_REVISION", "dev"),
+                }
+            )
+            maybe_set_otel_providers(
+                otel_resource=otel_resource, otel_hooks_to_setup=[hooks]
+            )
+            logger.info(
+                "otel exporters initialised (spans=%s metrics=%s)",
+                bool(hooks.span_processors), bool(hooks.metric_readers),
+            )
+        except Exception as exc:  # noqa: BLE001 — telemetry must never block serving
+            logger.warning("otel init skipped: %s", exc)
+    else:
+        logger.info("otel cloud export disabled (RECONCILER_OTEL unset) — HTTP traces + logs + Firestore audit active")
     logger.info("reconciler server up — model=%s project=%s", config.GEMINI_MODEL, config.GCP_PROJECT)
     yield
 
