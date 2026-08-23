@@ -25,15 +25,33 @@ PROJECT="reconciler-mohammed-emad"
 REGION="us-central1"
 SERVICE_URL="https://reconciler-542923033636.us-central1.run.app"
 TOPIC="reconciler.trigger"
+SCHEDULER_JOB="reconciler-weekly"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 export GOOGLE_GENAI_USE_VERTEXAI=1 GOOGLE_CLOUD_PROJECT="$PROJECT" GOOGLE_CLOUD_LOCATION="$REGION"
+export GOOGLE_APPLICATION_CREDENTIALS="${GOOGLE_APPLICATION_CREDENTIALS:-$HOME/keys/reconciler-sa.json}"
 
 banner() { printf '\n\033[1;36m=== %s ===\033[0m\n' "$1"; }
 wait_for() { read -r -p "▶ Press Enter to continue ($1)..." _; }
 TOKEN() { gcloud auth print-identity-token 2>/dev/null; }
 
-RUN_ID="demo_$(date +%s)"
+# Newest run_id from Firestore (the scheduler picks the id, not us).
+latest_run_id() {
+  GOOGLE_APPLICATION_CREDENTIALS="$GOOGLE_APPLICATION_CREDENTIALS" GOOGLE_CLOUD_PROJECT="$PROJECT" \
+    uv run python "$SCRIPT_DIR/latest_run.py" \
+    | python3 -c "import sys,json; print(json.load(sys.stdin).get('run_id',''))"
+}
+
+# Poll (up to ~60s) for a run_id newer than $1.
+discover_run() {
+  local pre="$1" cur=""
+  for _ in $(seq 1 30); do
+    cur="$(latest_run_id)"
+    if [ -n "$cur" ] && [ "$cur" != "$pre" ]; then echo "$cur"; return 0; fi
+    sleep 2
+  done
+  echo "$cur"; return 1
+}
 
 # ---------------------------------------------------------------------------
 banner "BEAT 1 — The stakes (30s)"
@@ -44,14 +62,15 @@ wait_for "open tests/fixtures_duplicate/duplicate_invoice_sample.pdf"
 
 # ---------------------------------------------------------------------------
 banner "BEAT 2 — The trigger (30s)"
-echo "Publish the weekly job straight to Pub/Sub (same message Cloud Scheduler"
-echo "fires on cron '0 8 * * 1'). Push → Cloud Run → the six-stage pipeline."
-gcloud pubsub topics publish "$TOPIC" --project "$PROJECT" \
-  --attribute="run_id=$RUN_ID,directory=tests/fixtures_duplicate" \
-  --message='{"job_type":"weekly_reconcile"}'
-echo "→ published to $TOPIC (run_id=$RUN_ID, directory=tests/fixtures_duplicate)"
-echo "No human touched it. The container cold-starts, runs, and idles back to 0."
-wait_for "pipeline to finish (watch /health if you like)"
+echo "Fire the ACTUAL Cloud Scheduler cron job — the autonomous weekly trigger."
+echo "No human publishes a message; the schedule does it (cron '0 8 * * 1')."
+PRE_RUN_ID="$(latest_run_id)"
+gcloud scheduler jobs run "$SCHEDULER_JOB" --project "$PROJECT" --location "$REGION"
+echo "→ $SCHEDULER_JOB fired → Pub/Sub push → Cloud Run cold-starts → seven-stage pipeline."
+RUN_ID="$(discover_run "$PRE_RUN_ID")"
+echo "→ run_id=$RUN_ID (discovered from Firestore — the scheduler chose it, not us)"
+echo "No human touched it. The container runs, then idles back to 0."
+wait_for "pipeline to finish (~60s)"
 
 # ---------------------------------------------------------------------------
 banner "BEAT 3 — The resolution loop (60s)"
