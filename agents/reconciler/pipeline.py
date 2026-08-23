@@ -190,11 +190,13 @@ class Pipeline:
         # P10 resilience: every LLM call runs behind watchdog + breaker +
         # adaptive retry. Vertex timeouts/quota blips retry with backoff;
         # a hard-failing Vertex trips the breaker and fail-isolates the
-        # invoice instead of stalling the whole run.
+        # invoice instead of stalling the whole run. Watchdog is 60s (not 180s)
+        # so a stalled Gemini call recovers 3x faster and the breaker does not
+        # cascade across invoices on a shared 512Mi instance.
         final_text = await guard(
             "vertex-ai",
             breaker=self._vertex_breaker,
-            timeout_s=180.0,
+            timeout_s=60.0,
             max_attempts=3,
             base_s=2.0,
         )(_drive)
