@@ -42,10 +42,17 @@ RUNTIME_SA: str = os.environ.get(
 # tests/test_gmail.py. Agents never read this directly — only the middleware
 # layer touches the secret store (design §8 credential isolation).
 SECRET_OAUTH_CONFIG: str = "reconciler-oauth-config"
+# Gmail SMTP app-password config (sender / password / optional redirect_to).
+# The resolution agent never touches this — only the approval surface sends.
+SECRET_SMTP_CONFIG: str = "reconciler-smtp-config"
 
 # ---- Pub/Sub topics (created in Phase 5) ------------------------------------
 TOPIC_TRIGGER: str = "reconciler.trigger"   # Cloud Scheduler publishes here
 TOPIC_DLQ: str = "reconciler.dlq"          # poisoned invoices (never crash run)
+
+# ---- Cloud Scheduler (the autonomous cron trigger) ---------------------------
+SCHEDULER_JOB: str = "reconciler-weekly"    # the cron job that wakes the agent
+SCHEDULER_SCHEDULE: str = "0 8 * * 1"       # every Monday 08:00 UTC
 
 # ---- Firestore (created in Phase 4) ----------------------------------------
 FIRESTORE_DATABASE: str = "(default)"

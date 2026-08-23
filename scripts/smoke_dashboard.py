@@ -121,10 +121,14 @@ def main() -> None:
             body = r.text
             needles = [
                 "dollars recovered",
-                "dollars at risk",
-                "invoices cleared",
+                "awaiting your approval",
+                "invoices processed",
+                "reconciliation runs",
+                "Seven stages",
+                "How it protects you",
+                "Where it runs",
                 "Recent runs",
-                "Learned memory",
+                "Learned facts",
                 RUN_ID,
                 "123.45",
                 VENDOR,
