@@ -328,17 +328,20 @@ async def index() -> HTMLResponse:
     )
 
 
-def _pipeline_for(directory: str | None) -> Pipeline:
+def _pipeline_for(directory: str | None, source: str | None) -> Pipeline:
     client = get_firestore_client()
+    source = source or "local_dir"
     directory = directory or "tests/fixtures"
     bank_csv = os.path.join(directory, "bank_statement.csv")
     return Pipeline(
         store=RunsStore(client=client),
         memory=SharedMemory(client=client),
-        source="local_dir",
+        source=source,
         directory=directory,
         # Pair the bank statement with the chosen fixture set (e.g. the
-        # duplicates set carries the two INV-2026-0421 debits).
+        # duplicates set carries the two INV-2026-0421 debits). For the gmail
+        # source the directory is unused for intake — it only selects the bank
+        # statement the invoices are cross-checked against.
         bank_csv=bank_csv if os.path.exists(bank_csv) else None,
     )
 
@@ -469,11 +472,12 @@ async def trigger_pubsub(envelope: dict[str, Any]) -> JSONResponse:
     job_type = payload.get("job_type") or attributes.get("job_type") or "weekly_reconcile"
     run_id = attributes.get("run_id") or f"pubsub_{message_id}"
     directory = attributes.get("directory")
-    logger.info("trigger: subscription=%s messageId=%s run_id=%s job=%s dir=%s",
-                envelope.get("subscription", ""), message_id, run_id, job_type, directory)
+    source = attributes.get("source")
+    logger.info("trigger: subscription=%s messageId=%s run_id=%s job=%s source=%s dir=%s",
+                envelope.get("subscription", ""), message_id, run_id, job_type, source, directory)
     try:
         async with _RUN_LOCK:
-            result = await _pipeline_for(directory).run(run_id=run_id, job_type=job_type)
+            result = await _pipeline_for(directory, source).run(run_id=run_id, job_type=job_type)
         return JSONResponse(
             {
                 "status": "ok",
