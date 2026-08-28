@@ -10,11 +10,13 @@ Usage:
     GOOGLE_APPLICATION_CREDENTIALS=~/keys/reconciler-sa.json \
     GOOGLE_GENAI_USE_VERTEXAI=1 GOOGLE_CLOUD_PROJECT=reconciler-mohammed-emad \
     GOOGLE_CLOUD_LOCATION=us-central1 \
-    uv run python scripts/run_pipeline.py [run_id] [--directory DIR]
+    uv run python scripts/run_pipeline.py [run_id] [--directory DIR] [--source gmail]
 
 Pass the same run_id twice to prove idempotency (second run: 0 LLM calls).
 --directory selects the local_dir intake source (default tests/fixtures);
 point it at tests/fixtures_duplicate for the $2,400 duplicate-payment demo.
+--source gmail reads invoices from the linked Gmail inbox (OAuth from Secret
+Manager) instead of the local fixture directory.
 """
 
 from __future__ import annotations
@@ -39,6 +41,13 @@ async def main() -> int:
         except IndexError:
             print("error: --directory requires a path", file=sys.stderr)
             return 2
+    source = None
+    if "--source" in sys.argv:
+        try:
+            source = sys.argv[sys.argv.index("--source") + 1]
+        except IndexError:
+            print("error: --source requires a value", file=sys.stderr)
+            return 2
     run_id = args[0] if args else None
     client = get_firestore_client()
     store = RunsStore(client)
@@ -46,6 +55,8 @@ async def main() -> int:
     kwargs = {"store": store, "memory": memory}
     if directory is not None:
         kwargs["directory"] = directory
+    if source is not None:
+        kwargs["source"] = source
     pipe = Pipeline(**kwargs)
 
     print(f"reconciler batch pipeline — project={store.client.project} db=(default)")

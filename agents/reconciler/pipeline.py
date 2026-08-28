@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import base64
 import difflib
 import json
 import logging
@@ -217,6 +218,35 @@ class Pipeline:
             if out.get("errors"):
                 logger.warning("intake errors (non-fatal): %s", out["errors"])
             return pdfs
+        if self.source == "gmail":
+            listing = intake_tools.list_invoice_emails()
+            msgs = listing.get("messages", [])
+            if listing.get("errors"):
+                logger.warning("gmail list errors (non-fatal): %s", listing["errors"])
+            atts: list[dict[str, Any]] = []
+            for m in msgs:
+                fetched = intake_tools.fetch_invoice_pdf(m["message_id"])
+                if fetched.get("errors") or not fetched.get("data_b64"):
+                    logger.warning(
+                        "gmail fetch %s failed: %s",
+                        m["message_id"],
+                        fetched.get("errors"),
+                    )
+                    continue
+                raw = base64.b64decode(fetched["data_b64"])
+                atts.append(
+                    {
+                        "filename": fetched.get("filename")
+                        or f"{m['message_id']}.pdf",
+                        "mime_type": fetched.get("mime_type", "application/pdf"),
+                        "data_b64": fetched["data_b64"],
+                        "sha256": fetched.get("sha256"),
+                        "size": len(raw),
+                        "message_id": m["message_id"],
+                        "subject": m.get("subject"),
+                    }
+                )
+            return atts
         raise ValueError(f"unsupported intake source {self.source!r}")
 
     async def _stage_extraction(
@@ -627,9 +657,13 @@ class Pipeline:
     # ------------------------------------------------------------------
 
     async def _load_pdf(self, att: dict[str, Any]) -> bytes:
-        if self.source != "local_dir":
-            raise ValueError(f"pdf loading for source {self.source!r} not wired")
-        return intake_tools.read_local_pdf(str(self.directory / att["filename"]))
+        if self.source == "local_dir":
+            return intake_tools.read_local_pdf(
+                str(self.directory / att["filename"])
+            )
+        if self.source == "gmail":
+            return base64.b64decode(att["data_b64"])
+        raise ValueError(f"pdf loading for source {self.source!r} not wired")
 
     _LEASE_SECONDS = 600  # a worker holding an in_progress invoice for >10min
     #   without a checkpoint is presumed crashed — resume allowed.
@@ -740,7 +774,14 @@ class Pipeline:
                         "source": self.source,
                         **{
                             k: att.get(k)
-                            for k in ("filename", "mime_type", "sha256", "size")
+                            for k in (
+                                "filename",
+                                "mime_type",
+                                "sha256",
+                                "size",
+                                "message_id",
+                                "subject",
+                            )
                         },
                     }
                 elif stage == "extraction":
