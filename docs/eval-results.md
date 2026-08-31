@@ -58,7 +58,7 @@
       },
       {
         "injection": "date_mismatch",
-        "matched": false,
+        "matched": true,
         "detected_types": [
           "date_mismatch"
         ],
@@ -82,7 +82,7 @@
       },
       {
         "injection": "duplicate_payment",
-        "matched": false,
+        "matched": true,
         "detected_types": [
           "duplicate_payment"
         ],

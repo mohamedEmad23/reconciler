@@ -117,3 +117,16 @@ posting lag as normal, which is exactly what §1.3 of the closed-loop spec says 
 should. Strengthening the injection to a 49-day gap (unambiguously anomalous)
 restored 5/5. This is the anti-gaming doctrine in action: report the miss, don't
 fudge the harness to hide it.
+
+A second model-behaviour note (gemini-3.5-flash, post-P21): the CoVe verdict's
+`matched` boolean is near-deterministic for the borderline injections (vendor /
+date / duplicate_payment) — 3.5-flash sometimes returns `matched=true` *while still
+populating the `discrepancy` types* (it found the transaction in the bank
+statement, then flagged the disagreeing field). 2.5-flash returned `matched=false`
+when any field disagreed. Recall is unaffected — `5/5` in both models and across
+re-runs — because the harness scores `caught` from the reported discrepancy types,
+not the `matched` boolean. Arguably this is the *more* precise behaviour: "found
+the transaction, and here is the discrepancy" rather than "no match at all". The
+full pipeline (`smoke_mismatch.py`) confirms all three still surface as
+reconciliation verdicts of `discrepancy` and flow into the resolve/dispute/escalate
+decision table.
