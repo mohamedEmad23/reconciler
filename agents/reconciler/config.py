@@ -70,6 +70,14 @@ FIRESTORE_DATABASE: str = "(default)"
 # ---- Agent identity ---------------------------------------------------------
 APP_NAME: str = "reconciler"
 
+# ---- Live service URL -------------------------------------------------------
+# The Cloud Run .run.app URL uses the project NUMBER (not name). Shown in the
+# digest email + dashboard so a human knows where to review flagged items.
+SERVICE_URL: str = os.environ.get(
+    "RECONCILER_SERVICE_URL",
+    "https://reconciler-542923033636.us-central1.run.app",
+)
+
 
 @dataclass(frozen=True)
 class RuntimeConfig:
