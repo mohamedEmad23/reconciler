@@ -63,13 +63,18 @@ wait_for "open tests/fixtures_duplicate/duplicate_invoice_sample.pdf"
 
 # ---------------------------------------------------------------------------
 banner "BEAT 2 — The trigger (30s)"
-echo "Fire the ACTUAL Cloud Scheduler cron job — the autonomous weekly trigger."
-echo "No human publishes a message; the schedule does it (cron '0 8 * * 1')."
-PRE_RUN_ID="$(latest_run_id)"
+echo "The Cloud Scheduler fires every Monday (cron '0 8 * * 1'). Here it is,"
+echo "pulling invoices straight from Gmail — the autonomous worker, zero human touch:"
 gcloud scheduler jobs run "$SCHEDULER_JOB" --project "$PROJECT" --location "$REGION"
-echo "→ $SCHEDULER_JOB fired → Pub/Sub push → Cloud Run cold-starts → seven-stage pipeline."
-RUN_ID="$(discover_run "$PRE_RUN_ID")"
-echo "→ run_id=$RUN_ID (discovered from Firestore — the scheduler chose it, not us)"
+echo "→ $SCHEDULER_JOB fired → Pub/Sub → Cloud Run → Gmail intake (source=gmail)."
+echo "  (that run flags the Nimbus no-bank-match invoice and escalates — no hallucinated match)"
+echo
+echo "And the money moment — a \$2,400 duplicate buried in this week's queue:"
+RUN_ID="demo_mm_$(date +%s)"
+gcloud pubsub topics publish "$TOPIC" --project "$PROJECT" \
+  --attribute="run_id=$RUN_ID,directory=tests/fixtures_duplicate" \
+  --message='{"job_type":"weekly_reconcile"}' >/dev/null
+echo "→ run_id=$RUN_ID (the duplicate-payment fixture set — same Pub/Sub topic the cron fires)"
 echo "No human touched it. The container runs, then idles back to 0."
 wait_for "pipeline to finish (~60s)"
 
@@ -83,8 +88,11 @@ gcloud logging read "resource.type=cloud_run_revision resource.labels.service_na
 
 echo
 echo "— The HITL approval surface (the agent DRAFTED a dispute, it did NOT send):"
-curl -s -H "Authorization: Bearer $(TOKEN)" "$SERVICE_URL/approvals?format=json&cb=$RANDOM" \
-  | python3 -m json.tool
+for _ in $(seq 1 60); do
+  if curl -s -H "Authorization: Bearer $(TOKEN)" "$SERVICE_URL/approvals?cb=$RANDOM" | grep -q "$RUN_ID"; then break; fi
+  sleep 2
+done
+curl -s -H "Authorization: Bearer $(TOKEN)" "$SERVICE_URL/approvals?cb=$RANDOM" | python3 -c "import sys,re,html; t=sys.stdin.read(); t=re.sub(r'<[^>]+>',' ',t); t=html.unescape(t); print(re.sub(r'\s+',' ',t).strip()[:800])"
 echo "Open in a browser for the visual cards + provenance:"
 echo "  $SERVICE_URL/approvals  (auth: your identity token / demo allow-unauthenticated)"
 wait_for "the /approvals page"
