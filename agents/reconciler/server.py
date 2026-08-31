@@ -64,21 +64,35 @@ _PAGE_CSS = """
 body{font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
      margin:0;color:var(--text);background:var(--bg);line-height:1.5}
 .hero{background:linear-gradient(135deg,#0f172a 0%,#1e3a5f 55%,#065f46 100%);
-      color:#fff;padding:2.25rem 2rem 1.6rem}
+      color:#fff;padding:2.25rem 2rem 1.6rem;position:relative;overflow:hidden}
+.hero::after{content:"";position:absolute;inset:0;pointer-events:none;
+      background:linear-gradient(120deg,transparent 30%,rgba(255,255,255,.07) 48%,transparent 64%);
+      background-size:220% 100%;animation:sheen 7s ease-in-out infinite}
+@keyframes sheen{0%{background-position:140% 0}100%{background-position:-40% 0}}
 .hero .brand{font-size:1.9rem;font-weight:800;letter-spacing:-.02em}
 .hero .tagline{margin-top:.4rem;font-size:1.05rem;color:#cbd5e1;max-width:54rem}
 .hero .meta{margin-top:1.1rem;display:flex;gap:.5rem;flex-wrap:wrap}
 .badge{display:inline-flex;align-items:center;gap:.4rem;background:rgba(255,255,255,.12);
        border:1px solid rgba(255,255,255,.22);border-radius:999px;padding:.22rem .75rem;
        font-size:.78rem;font-weight:600}
-.dot{width:.5rem;height:.5rem;border-radius:50%;background:#34d399}
-.wrap{max-width:64rem;margin:0 auto;padding:1.5rem 1rem 3rem}
+.dot{width:.5rem;height:.5rem;border-radius:50%;background:#34d399;
+     box-shadow:0 0 0 0 rgba(52,211,153,.55);animation:pulse 2s infinite}
+@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(52,211,153,.55)}
+  70%{box-shadow:0 0 0 7px rgba(52,211,153,0)}100%{box-shadow:0 0 0 0 rgba(52,211,153,0)}}
+.wrap{max-width:64rem;margin:0 auto;padding:1.5rem 1rem 3rem;animation:rise .5s ease both}
+@keyframes rise{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
 h2{font-size:1.06rem;font-weight:700;margin:1.9rem 0 .6rem;letter-spacing:-.01em}
 h2 .kicker{display:block;font-size:.68rem;font-weight:700;text-transform:uppercase;
            letter-spacing:.09em;color:var(--muted);margin-bottom:.15rem}
 .score{display:grid;grid-template-columns:repeat(auto-fit,minmax(10.5rem,1fr));gap:.9rem}
 .metric{background:var(--card);border:1px solid var(--border);border-radius:.75rem;
-        padding:1.05rem 1.2rem}
+        padding:1.05rem 1.2rem;position:relative;overflow:hidden;
+        transition:transform .18s ease,box-shadow .18s ease}
+.metric:hover{transform:translateY(-3px);box-shadow:0 10px 26px rgba(15,23,42,.09)}
+.metric::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:#94a3b8}
+.metric.green::before{background:var(--green)}
+.metric.amber::before{background:var(--amber)}
+.metric.blue::before{background:var(--blue)}
 .metric .num{font-size:1.75rem;font-weight:800;letter-spacing:-.02em}
 .metric .lbl{color:var(--muted);font-size:.82rem;margin-top:.12rem}
 .metric.green .num{color:var(--green)}
@@ -86,8 +100,13 @@ h2 .kicker{display:block;font-size:.68rem;font-weight:700;text-transform:upperca
 .metric.blue .num{color:var(--blue)}
 .metric.neutral .num{color:var(--text)}
 .card{background:var(--card);border:1px solid var(--border);border-radius:.75rem;
-      padding:1.1rem 1.25rem;margin:1rem 0;box-shadow:0 1px 2px rgba(0,0,0,.04)}
-.card.hitl{border-color:#fcd34d;background:linear-gradient(180deg,#fffbeb,#fff)}
+      padding:1.1rem 1.25rem;margin:1rem 0;box-shadow:0 1px 2px rgba(0,0,0,.04);
+      transition:box-shadow .18s ease,transform .18s ease}
+.card:hover{box-shadow:0 8px 22px rgba(15,23,42,.07)}
+.card.hitl{border-color:#fcd34d;background:linear-gradient(180deg,#fffbeb,#fff);
+      border-left:4px solid var(--amber);animation:glow 2.6s ease-in-out infinite}
+@keyframes glow{0%,100%{box-shadow:0 0 0 0 rgba(252,211,77,0)}
+  50%{box-shadow:0 0 0 6px rgba(252,211,77,.16)}}
 .card h2{font-size:1rem;margin:0 0 .4rem}
 .amt{font-size:1.5rem;font-weight:800;color:var(--amber)}
 .muted{color:var(--muted);font-size:.85rem}
@@ -95,7 +114,9 @@ pre{background:#0f172a;color:#e2e8f0;padding:.85rem;border-radius:.5rem;white-sp
     font-size:.76rem;overflow-x:auto;line-height:1.45}
 form{display:inline-block;margin-right:.5rem;margin-top:.4rem}
 button{border:0;border-radius:.5rem;padding:.5rem 1.15rem;font-weight:700;cursor:pointer;
-       font-size:.9rem}
+       font-size:.9rem;transition:filter .15s ease,transform .15s ease}
+button:hover{filter:brightness(1.09);transform:translateY(-1px)}
+button:active{transform:translateY(0)}
 .approve{background:var(--green);color:#fff}
 .reject{background:var(--red);color:#fff}
 input[name=reason]{width:16rem;padding:.45rem;border:1px solid #d1d5db;border-radius:.5rem}
@@ -103,7 +124,9 @@ input[name=reason]{width:16rem;padding:.45rem;border:1px solid #d1d5db;border-ra
      padding:.12rem .6rem;font-size:.72rem;font-weight:700;margin-right:.35rem;color:#92400e}
 .pipeline{display:flex;flex-wrap:wrap;gap:.5rem}
 .stage{background:var(--card);border:1px solid var(--border);border-radius:.6rem;
-       padding:.55rem .85rem;font-size:.8rem;flex:1 1 11rem}
+       padding:.55rem .85rem;font-size:.8rem;flex:1 1 11rem;
+       transition:transform .18s ease,border-color .18s ease,box-shadow .18s ease}
+.stage:hover{transform:translateY(-2px);border-color:#cbd5e1;box-shadow:0 6px 16px rgba(15,23,42,.06)}
 .stage b{display:block;font-size:.86rem}
 .stage span{color:var(--muted);font-size:.74rem}
 .feature{display:flex;gap:.9rem;align-items:flex-start;padding:.8rem 0;border-bottom:1px solid var(--border)}
@@ -114,6 +137,8 @@ table{border-collapse:collapse;width:100%;font-size:.84rem;background:var(--card
       border:1px solid var(--border);border-radius:.75rem;overflow:hidden}
 th,td{text-align:left;padding:.5rem .7rem;border-bottom:1px solid var(--border)}
 th{color:var(--muted);font-weight:700;background:#fafafa}
+tbody tr{transition:background .15s ease}
+tbody tr:hover{background:#f8fafc}
 tr:last-child td{border-bottom:0}
 .status{font-weight:700}
 .status.completed{color:var(--green)}
@@ -125,7 +150,8 @@ tr:last-child td{border-bottom:0}
       overflow-x:auto}
 .gcp{display:grid;grid-template-columns:repeat(auto-fit,minmax(14rem,1fr));gap:.7rem}
 .gcp .svc{background:var(--card);border:1px solid var(--border);border-radius:.75rem;
-          padding:.8rem 1rem}
+          padding:.8rem 1rem;transition:transform .18s ease,border-color .18s ease,box-shadow .18s ease}
+.gcp .svc:hover{transform:translateY(-2px);border-color:#cbd5e1;box-shadow:0 6px 16px rgba(15,23,42,.06)}
 .gcp .svc b{font-size:.88rem}
 .gcp .svc .what{color:var(--muted);font-size:.78rem;margin-top:.15rem}
 """
