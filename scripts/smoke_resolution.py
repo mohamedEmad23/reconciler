@@ -21,7 +21,7 @@ Env (same as other live smokes):
   GOOGLE_APPLICATION_CREDENTIALS=$HOME/keys/reconciler-sa.json
   GOOGLE_GENAI_USE_VERTEXAI=1
   GOOGLE_CLOUD_PROJECT=reconciler-mohammed-emad
-  GOOGLE_CLOUD_LOCATION=us-central1
+  GOOGLE_CLOUD_LOCATION=global
 """
 
 from __future__ import annotations
@@ -53,7 +53,7 @@ def check_env() -> None:
             + ", ".join(missing)
             + "\nrun with: GOOGLE_APPLICATION_CREDENTIALS=$HOME/keys/reconciler-sa.json "
               "GOOGLE_GENAI_USE_VERTEXAI=1 GOOGLE_CLOUD_PROJECT=reconciler-mohammed-emad "
-              "GOOGLE_CLOUD_LOCATION=us-central1 uv run python scripts/smoke_resolution.py"
+              "GOOGLE_CLOUD_LOCATION=global uv run python scripts/smoke_resolution.py"
         )
 
 

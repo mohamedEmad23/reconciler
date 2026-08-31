@@ -11,6 +11,15 @@ Vertex AI routing is driven by the runtime environment, not hard-coded creds:
   supplies those creds automatically (no key file in the image). Locally we set
   ``GOOGLE_APPLICATION_CREDENTIALS`` to the SA key. NONE of these credentials
   ever live in the repo or the Docker image.
+
+IMPORTANT — Gemini 3.5 model location:
+  The Gemini 3.5 family (gemini-3.5-flash / -lite / -pro) is NOT served on
+  regional Vertex AI endpoints (all return 404 NOT_FOUND on us-central1 and
+  every other region). It IS served on the GLOBAL Agent-Platform endpoint.
+  Therefore ``GOOGLE_CLOUD_LOCATION`` MUST be ``global`` (not us-central1) for
+  the model. This is model-routing ONLY — the infra region (GCP_REGION below)
+  stays us-central1 for Firestore/Pub/Sub/Secret Manager, none of which read
+  ``GOOGLE_CLOUD_LOCATION``.
 """
 
 from __future__ import annotations
@@ -20,10 +29,11 @@ from dataclasses import dataclass
 
 
 # ---- Model — the one config constant ---------------------------------------
-# ``gemini-2.5-flash`` is the LIVE callable model on us-central1 via Vertex AI
-# (probed 2025-08-15 with the runtime SA). It qualifies under the rubric's
-# "Gemini 3.5 Flash (or newer)" / "any Gemini 3.x" fallback. Swap here only.
-GEMINI_MODEL: str = os.environ.get("RECONCILER_GEMINI_MODEL", "gemini-2.5-flash")
+# ``gemini-3.5-flash`` is the rubric's exact target ("Gemini 3.5 Flash"). It is
+# callable ONLY via the global endpoint (GOOGLE_CLOUD_LOCATION=global), verified
+# 2026-08-31 with the runtime SA. ``gemini-3.5-flash-lite`` is the cheaper
+# fallback (same global endpoint). Swap here only.
+GEMINI_MODEL: str = os.environ.get("RECONCILER_GEMINI_MODEL", "gemini-3.5-flash")
 
 # ---- GCP project / region ---------------------------------------------------
 GCP_PROJECT: str = os.environ.get(

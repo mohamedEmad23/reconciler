@@ -9,7 +9,7 @@ and Shared Epistemic Memory writes.
 Usage:
     GOOGLE_APPLICATION_CREDENTIALS=~/keys/reconciler-sa.json \
     GOOGLE_GENAI_USE_VERTEXAI=1 GOOGLE_CLOUD_PROJECT=reconciler-mohammed-emad \
-    GOOGLE_CLOUD_LOCATION=us-central1 \
+    GOOGLE_CLOUD_LOCATION=global \
     uv run python scripts/run_pipeline.py [run_id] [--directory DIR] [--source gmail]
 
 Pass the same run_id twice to prove idempotency (second run: 0 LLM calls).

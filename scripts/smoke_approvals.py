@@ -10,7 +10,7 @@ reason for the P14 negative-fact loop.
 Run:
   GOOGLE_APPLICATION_CREDENTIALS=$HOME/keys/reconciler-sa.json \
   GOOGLE_GENAI_USE_VERTEXAI=1 GOOGLE_CLOUD_PROJECT=reconciler-mohammed-emad \
-  GOOGLE_CLOUD_LOCATION=us-central1 uv run python scripts/smoke_approvals.py
+  GOOGLE_CLOUD_LOCATION=global uv run python scripts/smoke_approvals.py
 """
 
 import asyncio

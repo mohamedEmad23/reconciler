@@ -15,7 +15,7 @@ a deliberately non-default stack:
 | Layer | Choice |
 |---|---|
 | Agent framework | **Google ADK 2.7** (Python) — not LangChain |
-| Model | **Gemini 2.5 Flash** via **Vertex AI** (one config constant, temp=0.0) |
+| Model | **Gemini 3.5 Flash** via **Vertex AI** (global endpoint, one config constant, temp=0.0) |
 | Runtime | **Cloud Run** (pure FastAPI surface, service-account-only invoker) |
 | Trigger | **Cloud Scheduler** → **Pub/Sub** push (OIDC) → `/trigger/pubsub` |
 | State/memory | **Firestore** — `runs`, `run_invoices`, `memory` collections |
@@ -91,7 +91,10 @@ Owner, Docker running (Cloud Build builds the image).
 
 ```bash
 # 0) env
-export PROJECT=your-project-id REGION=us-central1
+#   REGION is the infra region (Firestore/Pub/Sub/Scheduler); MODEL_LOCATION is
+#   the Gemini endpoint — MUST be `global` because Gemini 3.5 is only served on
+#   the global Agent-Platform endpoint (regional Vertex returns 404).
+export PROJECT=your-project-id REGION=us-central1 MODEL_LOCATION=global
 gcloud config set project "$PROJECT"
 
 # 1) enable APIs + create Firestore (skip any that exist)
@@ -117,7 +120,7 @@ gcloud pubsub topics create reconciler.trigger
 gcloud pubsub topics create reconciler.dlq
 gcloud run deploy reconciler --source . --region "$REGION" \   # deploy first to get URL
   --service-account "reconciler-sa@$PROJECT.iam.gserviceaccount.com" \
-  --set-env-vars "GOOGLE_GENAI_USE_VERTEXAI=1,GOOGLE_CLOUD_PROJECT=$PROJECT,GOOGLE_CLOUD_LOCATION=$REGION" \
+  --set-env-vars "GOOGLE_GENAI_USE_VERTEXAI=1,GOOGLE_CLOUD_PROJECT=$PROJECT,GOOGLE_CLOUD_LOCATION=$MODEL_LOCATION" \
   --no-allow-unauthenticated --min-instances=0 --max-instances=1 \
   --memory=512Mi --concurrency=4 --timeout=300 --port=8080 --quiet
 URL="https://$(gcloud run services describe reconciler --region "$REGION" --format 'value(status.url)')"
@@ -159,7 +162,7 @@ gcloud logging read 'resource.type=cloud_run_revision resource.labels.service_na
 
 # full seven-specialist batch spine (writes real Firestore state)
 GOOGLE_APPLICATION_CREDENTIALS=~/keys/reconciler-sa.json \
-GOOGLE_GENAI_USE_VERTEXAI=1 GOOGLE_CLOUD_PROJECT=$PROJECT GOOGLE_CLOUD_LOCATION=$REGION \
+GOOGLE_GENAI_USE_VERTEXAI=1 GOOGLE_CLOUD_PROJECT=$PROJECT GOOGLE_CLOUD_LOCATION=$MODEL_LOCATION \
 uv run python scripts/run_pipeline.py demo_live
 
 # re-run the SAME id → skipped, 0 LLM calls (idempotency proof)
@@ -229,7 +232,7 @@ Every phase shipped with a smoke that asserts the claim it makes
 
 ```bash
 GOOGLE_APPLICATION_CREDENTIALS=~/keys/reconciler-sa.json \
-GOOGLE_GENAI_USE_VERTEXAI=1 GOOGLE_CLOUD_PROJECT=$PROJECT GOOGLE_CLOUD_LOCATION=$REGION \
+GOOGLE_GENAI_USE_VERTEXAI=1 GOOGLE_CLOUD_PROJECT=$PROJECT GOOGLE_CLOUD_LOCATION=$MODEL_LOCATION \
 uv run python scripts/eval.py
 ```
 

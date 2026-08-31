@@ -16,7 +16,7 @@ Run (same Vertex env as scripts/smoke.py):
   GOOGLE_APPLICATION_CREDENTIALS=$HOME/keys/reconciler-sa.json \
   GOOGLE_GENAI_USE_VERTEXAI=1 \
   GOOGLE_CLOUD_PROJECT=reconciler-mohammed-emad \
-  GOOGLE_CLOUD_LOCATION=us-central1 \
+  GOOGLE_CLOUD_LOCATION=global \
   uv run python scripts/smoke_extraction.py
 
 Exit code 0 == Phase 2 smoke passed. Real Vertex calls (~$0.01 total for two

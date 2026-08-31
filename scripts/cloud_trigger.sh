@@ -46,7 +46,7 @@ LOGS=$(gcloud logging read \
 
 # Check for the three proof markers
 PUBSUB_HIT=$(echo "${LOGS}" | grep -c "Pub/Sub trigger:" || true)
-GEMINI_HIT=$(echo "${LOGS}" | grep -c "model: gemini-2.5-flash, backend: GoogleLLMVariant.VERTEX_AI" || true)
+GEMINI_HIT=$(echo "${LOGS}" | grep -c "model: gemini-3.5-flash, backend: GoogleLLMVariant.VERTEX_AI" || true)
 OK_HIT=$(echo "${LOGS}" | grep -c "trigger/pubsub HTTP/1.1\" 200" || true)
 
 echo ""

@@ -43,7 +43,7 @@ def _check_env() -> None:
     ):
         if not os.environ.get(var):
             raise SystemExit(f"missing env {var} — see module docstring")
-    assert config.GEMINI_MODEL == "gemini-2.5-flash", config.GEMINI_MODEL
+    assert config.GEMINI_MODEL == "gemini-3.5-flash", config.GEMINI_MODEL
 
 
 async def _categorize_once(runner: InMemoryRunner, session_id: str) -> dict:
