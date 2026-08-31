@@ -37,6 +37,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from google.cloud import firestore
 
 from . import approvals, config
+from .tools import email_tools
 from .memory import (
     MEMORY_COLLECTION,
     RUN_INVOICES_COLLECTION,
@@ -140,27 +141,6 @@ _PIPELINE_STAGES = [
     ("Reporting", "composes the weekly digest — blocked from sending"),
 ]
 
-_PROTECTIONS = [
-    ("Anti-hallucination",
-     "temperature 0.0 + native schema enforcement + CoVe independent verification. "
-     "A $1,000,000 decoy was planted in the fixture and never extracted."),
-    ("Closed-loop resolution",
-     "resolve / dispute / escalate from Python-computed evidence; a 'resolved' verdict "
-     "only counts after an independent re-verification."),
-    ("Human-in-the-loop",
-     "the agent cannot send email or move money — a human approves first. "
-     "High-stakes sends are gated behind approval."),
-    ("Resilience",
-     "retry with backoff + circuit breaker + dead-letter queue; a killed bank source "
-     "recovers instead of crashing."),
-    ("Provenance",
-     "every decision carries its 'why' — the rule fired, the evidence, the CoVe "
-     "questions, and a Cloud Trace link."),
-    ("Learning",
-     "approved decisions become memory facts that shorten next week's run — but never "
-     "skip verification."),
-]
-
 _GCP_SERVICES = [
     ("Cloud Scheduler", f"{config.SCHEDULER_JOB} — the cron that wakes the agent (no one asks it to run)"),
     ("Pub/Sub", f"{config.TOPIC_TRIGGER} event bus + {config.TOPIC_DLQ} dead-letter queue"),
@@ -246,12 +226,6 @@ async def index() -> HTMLResponse:
         for i, (name, desc) in enumerate(_PIPELINE_STAGES)
     )
 
-    prot_html = "".join(
-        f"<div class='feature'><div class='fname'>{html.escape(name)}</div>"
-        f"<div class='fdesc'>{html.escape(desc)}</div></div>"
-        for name, desc in _PROTECTIONS
-    )
-
     gcp_html = "".join(
         f"<div class='svc'><b>{html.escape(name)}</b>"
         f"<div class='what'>{html.escape(what)}</div></div>"
@@ -312,9 +286,7 @@ async def index() -> HTMLResponse:
         "<div class='pipeline'>" + pipeline_html + "</div>"
         "<h2><span class='kicker'>Human-in-the-loop · Tier 2</span>Awaiting your approval</h2>"
         + _dispute_cards(disputes, next_page="/")
-        + "<h2><span class='kicker'>Why you can trust it</span>How it protects you</h2>"
-        "<div class='card'>" + prot_html + "</div>"
-        "<h2><span class='kicker'>Architecture</span>Where it runs — Google Cloud</h2>"
+        + "<h2><span class='kicker'>Architecture</span>Where it runs — Google Cloud</h2>"
         "<div class='gcp'>" + gcp_html + "</div>"
         "<h2><span class='kicker'>Audit trail</span>Recent runs</h2>"
         + runs_table
@@ -478,6 +450,26 @@ async def trigger_pubsub(envelope: dict[str, Any]) -> JSONResponse:
     try:
         async with _RUN_LOCK:
             result = await _pipeline_for(directory, source).run(run_id=run_id, job_type=job_type)
+        # "Agent reports its results" beat: send a benign run summary to the
+        # operator (no HITL gate — it never touches money). Skipped on idempotent
+        # redelivery (skipped=True) so a Pub/Sub retry can't double-send. Non-fatal:
+        # a mail outage must never break (or force a redelivery of) the run.
+        if not result.skipped:
+            try:
+                summary_send = await asyncio.to_thread(
+                    email_tools.send_run_summary,
+                    run_id=result.run_id,
+                    job_type=result.job_type,
+                    invoices_total=result.invoices_total,
+                    invoices_completed=result.invoices_completed,
+                    invoices_failed=result.invoices_failed,
+                    flagged_count=result.flagged_count,
+                    dollars_at_risk=result.dollars_at_risk,
+                    dollars_recovered=result.dollars_recovered,
+                )
+                logger.info("run-summary email sent: %s", summary_send.get("sent"))
+            except Exception as exc:  # noqa: BLE001 — mail must not break the run
+                logger.warning("run-summary email failed: %s", exc)
         return JSONResponse(
             {
                 "status": "ok",

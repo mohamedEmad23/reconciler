@@ -80,3 +80,49 @@ def send_email(recipient: str, subject: str, body: str) -> dict[str, Any]:
         return {"sent": True, "message_id": None, "error": None}
     except Exception as exc:  # noqa: BLE001 — surfacing, not crashing
         return {"sent": False, "message_id": None, "error": f"{type(exc).__name__}: {exc}"}
+
+
+def send_run_summary(
+    *,
+    run_id: str,
+    job_type: str,
+    invoices_total: int,
+    invoices_completed: int,
+    invoices_failed: int,
+    flagged_count: int,
+    dollars_at_risk: float,
+    dollars_recovered: float,
+) -> dict[str, Any]:
+    """Send a benign run-summary email to the operator (no HITL gate).
+
+    This is the "agent reports its results" beat of the autonomous loop: after
+    a cron run the agent emails the operator a plain summary of what it did.
+    It never touches money — dispute escalation stays behind the HITL approval
+    surface (``approvals.approve``). Failures are captured, never raised, so a
+    mail outage can never break (or force a redelivery of) a run.
+    """
+    try:
+        cfg = _smtp_config()
+        recipient = cfg.get("redirect_to") or cfg["sender"]
+        subject = f"Reconciler {job_type} complete — {flagged_count} flagged"
+        matched = max(0, invoices_completed - flagged_count)
+        lines = [
+            f"Reconciler autonomous {job_type} run complete.",
+            f"  run id              : {run_id}",
+            f"  invoices processed  : {invoices_completed}/{invoices_total}",
+            f"  matched (no action) : {matched}",
+            f"  flagged for review  : {flagged_count}",
+            f"  failed              : {invoices_failed}",
+            f"  dollars at risk     : ${dollars_at_risk:,.2f}",
+            f"  dollars recovered   : ${dollars_recovered:,.2f}",
+            "",
+            "Review flagged items and approve / dispute / escalate on the dashboard:",
+            f"  {config.SERVICE_URL}",
+            "",
+            "(Automated message from the Reconciler agent. It never acts on money",
+            " without your explicit approval.)",
+        ]
+        body = "\n".join(lines)
+        return send_email(recipient, subject, body)
+    except Exception as exc:  # noqa: BLE001 — surfacing, not crashing
+        return {"sent": False, "message_id": None, "error": f"{type(exc).__name__}: {exc}"}

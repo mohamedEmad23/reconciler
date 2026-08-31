@@ -125,7 +125,6 @@ def main() -> None:
                 "invoices processed",
                 "reconciliation runs",
                 "Seven stages",
-                "How it protects you",
                 "Where it runs",
                 "Recent runs",
                 "Learned facts",
