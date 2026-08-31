@@ -63,6 +63,44 @@ DUP_SUBTOTAL = round(sum(q * p for _, q, p in DUP_LINE_ITEMS), 2)
 DUP_TAX = round(DUP_SUBTOTAL * DUP_TAX_RATE, 2)
 DUP_TOTAL = round(DUP_SUBTOTAL + DUP_TAX, 2)  # exactly 2400.00
 
+# ---------------------------------------------------------------------------
+# Mismatch fixtures (P24): three invoices, each cross-checked against a
+# deliberately WRONG bank row, covering the three remaining discrepancy types
+# that the local fixture set does not yet exercise end-to-end:
+#   amount_mismatch   — bank charged the wrong amount (money at risk)
+#   vendor_mismatch   — bank row has a vendor-name typo (entity resolution)
+#   date_mismatch     — bank posted the charge 35 days after the invoice date
+# Each invoice uses the same messy-layout family so extraction adds real value.
+# ---------------------------------------------------------------------------
+
+# amount_mismatch: invoice says $1,150.00; the bank charged $1,500.00.
+AMT_VENDOR = "Stellar Analytics Ltd"
+AMT_INVOICE_NO = "INV-2026-0531"
+AMT_INVOICE_DATE = "2026-08-19"
+AMT_LINE_ITEMS = [("Data warehouse compute -- 1000 node-hours", 1000, 1.15)]
+AMT_TOTAL = round(sum(q * p for _, q, p in AMT_LINE_ITEMS), 2)  # 1150.00
+AMT_BANK_AMOUNT = 1500.00  # deliberately WRONG — bank overcharged by $350
+
+# vendor_mismatch: invoice number + amount match; the bank memo misspells the
+# vendor (missing the 'u' in "Quantum") -> entity-resolution / alias learning.
+VEND_VENDOR = "Quantum Robotics Corp"
+VEND_INVOICE_NO = "INV-2026-0642"
+VEND_INVOICE_DATE = "2026-08-20"
+VEND_LINE_ITEMS = [("Industrial robot maintenance -- quarterly", 1, 3000.00)]
+VEND_TOTAL = round(sum(q * p for _, q, p in VEND_LINE_ITEMS), 2)  # 3000.00
+VEND_BANK_VENDOR = "QUANTOM ROBOTICS CORP"  # deliberate typo
+
+# date_mismatch: vendor + invoice number + amount all match; only the bank
+# posting date is anomalous — the bank charge predates the invoice by 37 days
+# (a payment BEFORE the invoice was issued is impossible, so CoVe flags it;
+# a charge AFTER the invoice would be treated as normal posting lag).
+DATE_VENDOR = "Nebula Data Systems"
+DATE_INVOICE_NO = "INV-2026-0753"
+DATE_INVOICE_DATE = "2026-08-21"
+DATE_LINE_ITEMS = [("Streaming analytics platform -- monthly", 1, 800.00)]
+DATE_TOTAL = round(sum(q * p for _, q, p in DATE_LINE_ITEMS), 2)  # 800.00
+DATE_BANK_DATE = "2026-07-15"  # 37 days BEFORE invoice date (impossible)
+
 
 def build_invoice_pdf(out_path: Path) -> None:
     pdf = FPDF(format="A4")
@@ -242,6 +280,104 @@ def build_bank_statement_csv_with_duplicates(out_path: Path) -> None:
         csv.writer(f).writerows(rows)
 
 
+def _build_mismatch_invoice_pdf(
+    out_path: Path,
+    vendor: str,
+    invoice_no: str,
+    invoice_date: str,
+    line_items: list,
+    tax_rate: float,
+    total: float,
+    note_text: str,
+) -> None:
+    """Generic messy-layout invoice for the P24 mismatch fixtures.
+
+    Shares the deliberately-scattered layout family of build_invoice_pdf
+    (vendor top-right, "INVOICE" top-left, compact scattered meta, bordered
+    line-item table, right-aligned totals, italic note) so extraction works
+    identically. tax_rate/total are computed by the caller for exact totals.
+    """
+    pdf = FPDF(format="A4")
+    pdf.set_creation_date(FIXTURE_CREATED_AT)
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+
+    pdf.set_xy(120, 15)
+    pdf.set_font("Helvetica", "B", 16)
+    pdf.multi_cell(0, 8, vendor)
+    pdf.set_xy(120, 30)
+    pdf.set_font("Helvetica", "", 10)
+    pdf.cell(0, 5, "1600 Amphitheatre Pkwy, Mountain View, CA 94043")
+
+    pdf.set_xy(15, 18)
+    pdf.set_font("Helvetica", "B", 22)
+    pdf.cell(0, 12, "INVOICE")
+
+    pdf.set_xy(15, 40)
+    pdf.set_font("Helvetica", "", 11)
+    pdf.cell(0, 6, f"Invoice #  {invoice_no}")
+    pdf.set_xy(15, 46)
+    pdf.cell(0, 6, f"Date      {invoice_date}")
+    pdf.set_xy(15, 52)
+    pdf.cell(0, 6, "Bill To:  Reconciler Demo Inc.")
+
+    pdf.set_xy(15, 68)
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.cell(125, 8, "Description", border=1)
+    pdf.cell(25, 8, "Qty", border=1, align="R")
+    pdf.cell(35, 8, "Amount", border=1, align="R")
+    pdf.ln()
+
+    pdf.set_font("Helvetica", "", 10)
+    for desc, qty, price in line_items:
+        pdf.set_x(15)
+        amt = round(qty * price, 2)
+        pdf.cell(125, 8, desc, border=1)
+        pdf.cell(25, 8, f"{qty}", border=1, align="R")
+        pdf.cell(35, 8, f"{amt:.2f}", border=1, align="R")
+        pdf.ln()
+
+    pdf.set_xy(125, pdf.get_y() + 4)
+    pdf.set_font("Helvetica", "", 11)
+    pdf.cell(40, 7, f"Subtotal   ${total:.2f}")
+    pdf.ln()
+    pdf.set_x(125)
+    pdf.cell(40, 7, f"Tax ({tax_rate * 100:.1f}%)  ${0.0:.2f}")
+    pdf.ln()
+    pdf.set_x(125)
+    pdf.set_font("Helvetica", "B", 13)
+    pdf.cell(40, 9, f"TOTAL  ${total:.2f}")
+    pdf.ln()
+
+    pdf.set_xy(15, pdf.get_y() + 10)
+    pdf.set_font("Courier", "I", 9)
+    pdf.multi_cell(0, 5, note_text)
+
+    pdf.output(str(out_path))
+
+
+def build_bank_statement_csv_mismatches(out_path: Path) -> None:
+    """Bank statement with three deliberately-wrong rows, one per mismatch
+    invoice (amount / vendor typo / anomalous date) + a couple of decoys."""
+    rows = [
+        ["date", "description", "amount", "balance_after"],
+        ["2026-08-01", "PAYROLL RUN 08/01", "-8400.00", "41200.11"],
+        # amount_mismatch: same vendor + invoice number, WRONG amount.
+        ["2026-08-19", f"CARD {AMT_VENDOR.upper()} {AMT_INVOICE_NO}",
+         f"-{AMT_BANK_AMOUNT:.2f}", "0.00"],
+        # vendor_mismatch: invoice number + amount match, vendor misspelled.
+        ["2026-08-20", f"CARD {VEND_BANK_VENDOR} {VEND_INVOICE_NO}",
+         f"-{VEND_TOTAL:.2f}", "0.00"],
+        # date_mismatch: vendor + number + amount match, bank charge predates
+        # the invoice (impossible — flagged as date_mismatch).
+        [DATE_BANK_DATE, f"CARD {DATE_VENDOR.upper()} {DATE_INVOICE_NO}",
+         f"-{DATE_TOTAL:.2f}", "0.00"],
+        ["2026-08-22", "SLACK MONTHLY", "-75.00", "0.00"],
+    ]
+    with open(out_path, "w", newline="") as f:
+        csv.writer(f).writerows(rows)
+
+
 def main() -> None:
     # Original single-invoice fixtures -- byte-identical outputs, untouched.
     build_invoice_pdf(HERE / "invoice_sample.pdf")
@@ -261,6 +397,38 @@ def main() -> None:
     print(f"  invoice_sample.pdf          (copy, deterministic rebuild)")
     print(f"  duplicate_invoice_sample.pdf invoice={DUP_INVOICE_NO} total=${DUP_TOTAL:.2f}")
     print(f"  bank_statement.csv           TWO matching debits ${DUP_TOTAL:.2f}")
+
+    # P24 mismatch set: three invoices, three different deliberate wrong bank
+    # rows (amount / vendor / date), one bank statement.
+    mismatch_dir = HERE.parent / "fixtures_mismatch"
+    mismatch_dir.mkdir(exist_ok=True)
+    _build_mismatch_invoice_pdf(
+        mismatch_dir / "amount_mismatch_invoice.pdf",
+        AMT_VENDOR, AMT_INVOICE_NO, AMT_INVOICE_DATE,
+        AMT_LINE_ITEMS, 0.0, AMT_TOTAL,
+        "NOTE: please remit net-30.",
+    )
+    _build_mismatch_invoice_pdf(
+        mismatch_dir / "vendor_mismatch_invoice.pdf",
+        VEND_VENDOR, VEND_INVOICE_NO, VEND_INVOICE_DATE,
+        VEND_LINE_ITEMS, 0.0, VEND_TOTAL,
+        "NOTE: please remit net-30.",
+    )
+    _build_mismatch_invoice_pdf(
+        mismatch_dir / "date_mismatch_invoice.pdf",
+        DATE_VENDOR, DATE_INVOICE_NO, DATE_INVOICE_DATE,
+        DATE_LINE_ITEMS, 0.0, DATE_TOTAL,
+        "NOTE: please remit net-30.",
+    )
+    build_bank_statement_csv_mismatches(mismatch_dir / "bank_statement.csv")
+    print(f"fixtures written to {mismatch_dir}")
+    print(f"  amount_mismatch_invoice.pdf invoice={AMT_INVOICE_NO} total=${AMT_TOTAL:.2f} "
+          f"(bank charged ${AMT_BANK_AMOUNT:.2f})")
+    print(f"  vendor_mismatch_invoice.pdf invoice={VEND_INVOICE_NO} total=${VEND_TOTAL:.2f} "
+          f"(bank memo {VEND_BANK_VENDOR!r})")
+    print(f"  date_mismatch_invoice.pdf   invoice={DATE_INVOICE_NO} total=${DATE_TOTAL:.2f} "
+          f"(bank date {DATE_BANK_DATE})")
+    print(f"  bank_statement.csv           3 deliberately-wrong rows")
 
 
 if __name__ == "__main__":
