@@ -29,6 +29,7 @@ import html
 import json
 import logging
 import os
+import uuid
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -36,7 +37,7 @@ from fastapi import FastAPI, Form
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from google.cloud import firestore
 
-from . import approvals, config
+from . import approvals, chat, config
 from .tools import email_tools
 from .memory import (
     MEMORY_COLLECTION,
@@ -128,6 +129,49 @@ tr:last-child td{border-bottom:0}
 .gcp .svc b{font-size:.88rem}
 .gcp .svc .what{color:var(--muted);font-size:.78rem;margin-top:.15rem}
 """
+
+_CHAT_JS = """
+<script>
+(function(){
+  var form=document.getElementById('chat-form');
+  if(!form)return;
+  var out=document.getElementById('chat-a');
+  var q=document.getElementById('chat-q');
+  var busy=document.getElementById('chat-busy');
+  form.addEventListener('submit',function(e){
+    e.preventDefault();
+    var text=(q.value||'').trim();
+    if(!text)return;
+    if(busy)busy.textContent='…';
+    fetch('/chat',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({question:text})})
+      .then(function(r){return r.json();})
+      .then(function(d){
+        if(busy)busy.textContent='';
+        out.textContent=d.answer||d.error||'no answer';
+      })
+      .catch(function(err){if(busy)busy.textContent='';out.textContent='error: '+err;});
+  });
+})();
+</script>
+"""
+
+
+def _chat_widget_html() -> str:
+    return (
+        "<div class='card'>"
+        "<p class='muted'>Ask about what the agent did — runs, invoices, flags, learned "
+        "facts, or dollars at risk. Answers are read from the auditable Firestore record, "
+        "not recalled from a vector store.</p>"
+        "<form id='chat-form' onsubmit='return false;' style='display:flex;gap:.5rem;width:100%;margin-top:.4rem'>"
+        "<input id='chat-q' type='text' placeholder='e.g. what invoices were processed and which were flagged?' "
+        "style='flex:1;padding:.55rem;border:1px solid #d1d5db;border-radius:.5rem'>"
+        "<button class='approve' type='submit'>Ask</button></form>"
+        "<div id='chat-busy' style='color:var(--muted);font-size:.8rem;margin-top:.4rem;min-height:1rem'></div>"
+        "<pre id='chat-a' style='margin-top:.5rem'>Answers appear here.</pre>"
+        "</div>"
+    )
+
 
 # Static judge-facing copy (the agent's capabilities are a fixed property of the
 # system — this is documentation rendered as UI, not runtime data).
@@ -292,11 +336,13 @@ async def index() -> HTMLResponse:
         + runs_table
         + "<h2><span class='kicker'>Memory</span>Learned facts (Shared Epistemic Memory)</h2>"
         + facts_html
+        + "<h2><span class='kicker'>Ask the agent</span>Chat with Reconciler</h2>"
+        + _chat_widget_html()
         + "</div>"
     )
     return HTMLResponse(
         "<html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
-        "<style>" + _PAGE_CSS + "</style></head><body>" + body + "</body></html>"
+        "<style>" + _PAGE_CSS + "</style></head><body>" + body + _CHAT_JS + "</body></html>"
     )
 
 
@@ -521,6 +567,28 @@ async def decision(
     if status == 200:
         return RedirectResponse(next, status_code=303)
     return JSONResponse(result, status_code=status)
+
+
+@app.post("/chat")
+async def chat_route(payload: dict[str, Any]) -> JSONResponse:
+    """Ask the agent a question about what it did.
+
+    Accepts ``{"question": "..."}`` and returns ``{"answer": "..."}``. The
+    answer is grounded in the structured Firestore record via the chat
+    assistant's read-only tools — never vector recall. A fresh session per
+    request keeps the Q&A stateless.
+    """
+    question = str((payload or {}).get("question") or "").strip()
+    if not question:
+        return JSONResponse({"answer": "", "error": "empty question"}, status_code=400)
+    try:
+        answer = await chat.ask_question(question, session_id=f"chat-{uuid.uuid4().hex[:12]}")
+        return JSONResponse({"answer": answer})
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("chat failed: %s", exc)
+        return JSONResponse(
+            {"answer": "", "error": f"{type(exc).__name__}: {exc}"}, status_code=500
+        )
 
 
 def main() -> None:  # pragma: no cover — container entrypoint

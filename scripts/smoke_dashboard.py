@@ -128,6 +128,7 @@ def main() -> None:
                 "Where it runs",
                 "Recent runs",
                 "Learned facts",
+                "Ask the agent",
                 RUN_ID,
                 "123.45",
                 VENDOR,
