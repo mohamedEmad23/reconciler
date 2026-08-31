@@ -57,7 +57,7 @@ discover_run() {
 # ---------------------------------------------------------------------------
 banner "BEAT 1 — The stakes (30s)"
 echo "Every Monday: 30 messy PDF invoices vs the bank statement. 4 hrs of a"
-echo "human's week. One $2,400 duplicate charge buried on page 3 of a $2,400"
+echo "human's week. One \$2,400 duplicate charge buried on page 3 of a \$2,400"
 echo "invoice that's already been paid. Reconciler is the worker that finds it."
 wait_for "open tests/fixtures_duplicate/duplicate_invoice_sample.pdf"
 
@@ -99,7 +99,7 @@ wait_for "the /approvals page"
 
 # ---------------------------------------------------------------------------
 banner "BEAT 4 — The money moment (30s)"
-echo "The duplicate_payment discrepancy → lane=dispute → draft for $2,400.00."
+echo "The duplicate_payment discrepancy → lane=dispute → draft for \$2,400.00."
 echo "The resolution agent holds NO send capability. A human approves:"
 APPROVE=$(curl -s -X POST \
   -H "Authorization: Bearer $(TOKEN)" \
