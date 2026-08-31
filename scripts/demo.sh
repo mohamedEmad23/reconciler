@@ -23,12 +23,13 @@ set -euo pipefail
 
 PROJECT="reconciler-mohammed-emad"
 REGION="us-central1"
+MODEL_LOCATION="global"   # Gemini 3.5 is served on the global endpoint, NOT regional Vertex
 SERVICE_URL="https://reconciler-542923033636.us-central1.run.app"
 TOPIC="reconciler.trigger"
 SCHEDULER_JOB="reconciler-weekly"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
-export GOOGLE_GENAI_USE_VERTEXAI=1 GOOGLE_CLOUD_PROJECT="$PROJECT" GOOGLE_CLOUD_LOCATION="$REGION"
+export GOOGLE_GENAI_USE_VERTEXAI=1 GOOGLE_CLOUD_PROJECT="$PROJECT" GOOGLE_CLOUD_LOCATION="$MODEL_LOCATION"
 export GOOGLE_APPLICATION_CREDENTIALS="${GOOGLE_APPLICATION_CREDENTIALS:-$HOME/keys/reconciler-sa.json}"
 
 banner() { printf '\n\033[1;36m=== %s ===\033[0m\n' "$1"; }

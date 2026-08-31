@@ -16,7 +16,7 @@ ENV_VARS=(
   GOOGLE_APPLICATION_CREDENTIALS="$HOME/keys/reconciler-sa.json"
   GOOGLE_GENAI_USE_VERTEXAI=1
   GOOGLE_CLOUD_PROJECT=reconciler-mohammed-emad
-  GOOGLE_CLOUD_LOCATION=us-central1
+  GOOGLE_CLOUD_LOCATION=global
 )
 
 restore() {

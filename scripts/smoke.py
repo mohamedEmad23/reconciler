@@ -2,7 +2,7 @@
 
 Proves the Phase 1 contract end-to-end without deploying:
   1. the `reconciler` agent package imports cleanly,
-  2. the Supervisor is a valid LlmAgent bound to `gemini-2.5-flash`,
+  2. the Supervisor is a valid LlmAgent bound to `gemini-3.5-flash`,
   3. a run trigger yields a structured ack from Gemini (via Vertex AI using the
      runtime SA credentials), and
   4. the reply parses as JSON of the documented shape.
@@ -13,7 +13,7 @@ Cloud Run service via `--set-env-vars`):
   GOOGLE_APPLICATION_CREDENTIALS=$HOME/keys/reconciler-sa.json \
   GOOGLE_GENAI_USE_VERTEXAI=1 \
   GOOGLE_CLOUD_PROJECT=reconciler-mohammed-emad \
-  GOOGLE_CLOUD_LOCATION=us-central1 \
+  GOOGLE_CLOUD_LOCATION=global \
   uv run python scripts/smoke.py
 
 Exit code 0 == smoke passed. This is a real call to Vertex AI; it costs a few

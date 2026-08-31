@@ -28,5 +28,5 @@ echo
 echo "Seeded. To run the money moment:"
 echo "  GOOGLE_APPLICATION_CREDENTIALS=\$HOME/keys/reconciler-sa.json \\"
 echo "  GOOGLE_GENAI_USE_VERTEXAI=1 GOOGLE_CLOUD_PROJECT=reconciler-mohammed-emad \\"
-echo "  GOOGLE_CLOUD_LOCATION=us-central1 \\"
+echo "  GOOGLE_CLOUD_LOCATION=global \\"
 echo "  uv run python scripts/run_pipeline.py duplicate_demo --directory tests/fixtures_duplicate"

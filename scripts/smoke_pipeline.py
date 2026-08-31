@@ -10,7 +10,7 @@ Env (same as other smokes):
   GOOGLE_APPLICATION_CREDENTIALS=$HOME/keys/reconciler-sa.json
   GOOGLE_GENAI_USE_VERTEXAI=1
   GOOGLE_CLOUD_PROJECT=reconciler-mohammed-emad
-  GOOGLE_CLOUD_LOCATION=us-central1
+  GOOGLE_CLOUD_LOCATION=global
 
 Cost: ~5 Vertex calls ≈ $0.03 (run 1). Run 2 reuses everything (0 LLM calls).
 """
